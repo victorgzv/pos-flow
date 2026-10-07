@@ -1,0 +1,292 @@
+import * as cdk from 'aws-cdk-lib';
+import * as s3 from 'aws-cdk-lib/aws-s3';
+import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
+import * as sqs from 'aws-cdk-lib/aws-sqs';
+import * as lambda from 'aws-cdk-lib/aws-lambda';
+import * as apigatewayv2 from 'aws-cdk-lib/aws-apigatewayv2';
+import * as apigatewayv2Integrations from 'aws-cdk-lib/aws-apigatewayv2-integrations';
+import * as s3n from 'aws-cdk-lib/aws-s3-notifications';
+import * as lambdaEventSources from 'aws-cdk-lib/aws-lambda-event-sources';
+import * as iam from 'aws-cdk-lib/aws-iam';
+import { Construct } from 'constructs';
+import * as path from 'path';
+
+export class PosPipelineStack extends cdk.Stack {
+  constructor(scope: Construct, id: string, props?: cdk.StackProps) {
+    super(scope, id, props);
+
+    // ==================== S3 Bucket ====================
+    const reportsBucket = new s3.Bucket(this, 'ReportsBucket', {
+      bucketName: undefined, // Let CDK generate unique name
+      removalPolicy: cdk.RemovalPolicy.DESTROY, // For dev/test; use RETAIN in prod
+      autoDeleteObjects: true, // For dev/test
+      encryption: s3.BucketEncryption.S3_MANAGED,
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      versioned: false,
+    });
+
+    // ==================== DynamoDB Tables ====================
+    const parsedRecordsTable = new dynamodb.Table(this, 'ParsedRecords', {
+      tableName: 'ParsedRecords',
+      partitionKey: { name: 'flightId', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'timestamp', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.DESTROY, // For dev/test
+      pointInTimeRecovery: false, // Enable in prod
+    });
+
+    const calculationResultsTable = new dynamodb.Table(this, 'CalculationResults', {
+      tableName: 'CalculationResults',
+      partitionKey: { name: 'flightId', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'timestamp', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.DESTROY, // For dev/test
+      pointInTimeRecovery: false,
+    });
+
+    // ==================== SQS Queues ====================
+    const processDlq = new sqs.Queue(this, 'ProcessDLQ', {
+      queueName: 'pos-pipeline-process-dlq',
+      retentionPeriod: cdk.Duration.days(14),
+      encryption: sqs.QueueEncryption.SQS_MANAGED,
+    });
+
+    const processQueue = new sqs.Queue(this, 'ProcessQueue', {
+      queueName: 'pos-pipeline-process-queue',
+      visibilityTimeout: cdk.Duration.seconds(180), // 3x Lambda timeout
+      receiveMessageWaitTime: cdk.Duration.seconds(20), // Long polling
+      deadLetterQueue: {
+        queue: processDlq,
+        maxReceiveCount: 3,
+      },
+      encryption: sqs.QueueEncryption.SQS_MANAGED,
+    });
+
+    // ==================== Lambda Functions ====================
+    // Path to the published Lambda packages (will be built from src/)
+    const lambdaCodePath = path.join(__dirname, '../../src');
+
+    // Ingest Lambda
+    const ingestFunction = new lambda.Function(this, 'IngestFunction', {
+      functionName: 'pos-pipeline-ingest',
+      runtime: lambda.Runtime.DOTNET_8,
+      handler: 'PosPipeline.Ingest::PosPipeline.Ingest.Function::FunctionHandler',
+      code: lambda.Code.fromAsset(lambdaCodePath, {
+        bundling: {
+          image: lambda.Runtime.DOTNET_8.bundlingImage,
+          command: [
+            '/bin/sh',
+            '-c',
+            [
+              'cd /asset-input',
+              'dotnet restore PosPipeline.sln',
+              'dotnet build PosPipeline.Ingest/PosPipeline.Ingest.csproj --configuration Release',
+              'dotnet publish PosPipeline.Ingest/PosPipeline.Ingest.csproj --configuration Release --output /asset-output',
+            ].join(' && '),
+          ],
+        },
+      }),
+      timeout: cdk.Duration.seconds(30),
+      memorySize: 512,
+      environment: {
+        BUCKET_NAME: reportsBucket.bucketName,
+      },
+    });
+
+    // Grant Ingest Lambda write access to pos/* prefix only
+    reportsBucket.grantPut(ingestFunction, 'pos/*');
+
+    // Parser Lambda
+    const parserFunction = new lambda.Function(this, 'ParserFunction', {
+      functionName: 'pos-pipeline-parser',
+      runtime: lambda.Runtime.DOTNET_8,
+      handler: 'PosPipeline.Parser::PosPipeline.Parser.Function::FunctionHandler',
+      code: lambda.Code.fromAsset(lambdaCodePath, {
+        bundling: {
+          image: lambda.Runtime.DOTNET_8.bundlingImage,
+          command: [
+            '/bin/sh',
+            '-c',
+            [
+              'cd /asset-input',
+              'dotnet restore PosPipeline.sln',
+              'dotnet build PosPipeline.Parser/PosPipeline.Parser.csproj --configuration Release',
+              'dotnet publish PosPipeline.Parser/PosPipeline.Parser.csproj --configuration Release --output /asset-output',
+            ].join(' && '),
+          ],
+        },
+      }),
+      timeout: cdk.Duration.seconds(60),
+      memorySize: 512,
+      environment: {
+        BUCKET_NAME: reportsBucket.bucketName,
+        PARSED_RECORDS_TABLE: parsedRecordsTable.tableName,
+        PROCESS_QUEUE_URL: processQueue.queueUrl,
+      },
+    });
+
+    // Grant Parser Lambda permissions
+    reportsBucket.grantRead(parserFunction, 'pos/*');
+    reportsBucket.grantPut(parserFunction, 'attachment/*');
+    parsedRecordsTable.grantWriteData(parserFunction);
+    processQueue.grantSendMessages(parserFunction);
+
+    // S3 Event notification: ObjectCreated on pos/* prefix -> Parser Lambda
+    reportsBucket.addEventNotification(
+      s3.EventType.OBJECT_CREATED,
+      new s3n.LambdaDestination(parserFunction),
+      { prefix: 'pos/' }
+    );
+
+    // Calculator Lambda
+    const calculatorFunction = new lambda.Function(this, 'CalculatorFunction', {
+      functionName: 'pos-pipeline-calculator',
+      runtime: lambda.Runtime.DOTNET_8,
+      handler: 'PosPipeline.Calculator::PosPipeline.Calculator.Function::FunctionHandler',
+      code: lambda.Code.fromAsset(lambdaCodePath, {
+        bundling: {
+          image: lambda.Runtime.DOTNET_8.bundlingImage,
+          command: [
+            '/bin/sh',
+            '-c',
+            [
+              'cd /asset-input',
+              'dotnet restore PosPipeline.sln',
+              'dotnet build PosPipeline.Calculator/PosPipeline.Calculator.csproj --configuration Release',
+              'dotnet publish PosPipeline.Calculator/PosPipeline.Calculator.csproj --configuration Release --output /asset-output',
+            ].join(' && '),
+          ],
+        },
+      }),
+      timeout: cdk.Duration.seconds(60),
+      memorySize: 512,
+      environment: {
+        BUCKET_NAME: reportsBucket.bucketName,
+        PARSED_RECORDS_TABLE: parsedRecordsTable.tableName,
+        CALCULATION_RESULTS_TABLE: calculationResultsTable.tableName,
+      },
+    });
+
+    // Grant Calculator Lambda permissions
+    parsedRecordsTable.grantReadData(calculatorFunction);
+    reportsBucket.grantRead(calculatorFunction, 'attachment/*');
+    reportsBucket.grantPut(calculatorFunction, 'results/*');
+    calculationResultsTable.grantWriteData(calculatorFunction);
+
+    // SQS event source for Calculator Lambda
+    calculatorFunction.addEventSource(
+      new lambdaEventSources.SqsEventSource(processQueue, {
+        batchSize: 10,
+        maxBatchingWindow: cdk.Duration.seconds(5),
+        reportBatchItemFailures: true,
+      })
+    );
+
+    // Status Lambda
+    const statusFunction = new lambda.Function(this, 'StatusFunction', {
+      functionName: 'pos-pipeline-status',
+      runtime: lambda.Runtime.DOTNET_8,
+      handler: 'PosPipeline.Status::PosPipeline.Status.Function::FunctionHandler',
+      code: lambda.Code.fromAsset(lambdaCodePath, {
+        bundling: {
+          image: lambda.Runtime.DOTNET_8.bundlingImage,
+          command: [
+            '/bin/sh',
+            '-c',
+            [
+              'cd /asset-input',
+              'dotnet restore PosPipeline.sln',
+              'dotnet build PosPipeline.Status/PosPipeline.Status.csproj --configuration Release',
+              'dotnet publish PosPipeline.Status/PosPipeline.Status.csproj --configuration Release --output /asset-output',
+            ].join(' && '),
+          ],
+        },
+      }),
+      timeout: cdk.Duration.seconds(30),
+      memorySize: 512,
+      environment: {
+        BUCKET_NAME: reportsBucket.bucketName,
+        PARSED_RECORDS_TABLE: parsedRecordsTable.tableName,
+        CALCULATION_RESULTS_TABLE: calculationResultsTable.tableName,
+      },
+    });
+
+    // Grant Status Lambda permissions
+    parsedRecordsTable.grantReadData(statusFunction);
+    calculationResultsTable.grantReadData(statusFunction);
+    reportsBucket.grantRead(statusFunction, 'results/*');
+    reportsBucket.grantRead(statusFunction, 'attachment/*'); // Optional for future parse details
+
+    // ==================== API Gateway HTTP API ====================
+    const httpApi = new apigatewayv2.HttpApi(this, 'PosReportsApi', {
+      apiName: 'pos-reports-api',
+      description: 'API for POS report ingestion and status queries',
+      corsPreflight: {
+        allowHeaders: ['Content-Type', 'Authorization'],
+        allowMethods: [
+          apigatewayv2.CorsHttpMethod.GET,
+          apigatewayv2.CorsHttpMethod.POST,
+        ],
+        allowOrigins: ['*'], // Restrict in production
+        maxAge: cdk.Duration.days(1),
+      },
+    });
+
+    // POST /pos-reports -> Ingest Lambda
+    httpApi.addRoutes({
+      path: '/pos-reports',
+      methods: [apigatewayv2.HttpMethod.POST],
+      integration: new apigatewayv2Integrations.HttpLambdaIntegration(
+        'IngestIntegration',
+        ingestFunction
+      ),
+    });
+
+    // GET /status/{flightId} -> Status Lambda
+    httpApi.addRoutes({
+      path: '/status/{flightId}',
+      methods: [apigatewayv2.HttpMethod.GET],
+      integration: new apigatewayv2Integrations.HttpLambdaIntegration(
+        'StatusIntegration',
+        statusFunction
+      ),
+    });
+
+    // ==================== Stack Outputs ====================
+    new cdk.CfnOutput(this, 'ApiUrl', {
+      value: httpApi.apiEndpoint,
+      description: 'HTTP API Gateway endpoint URL',
+      exportName: 'PosReportsApiUrl',
+    });
+
+    new cdk.CfnOutput(this, 'BucketName', {
+      value: reportsBucket.bucketName,
+      description: 'S3 bucket for POS reports',
+      exportName: 'PosReportsBucket',
+    });
+
+    new cdk.CfnOutput(this, 'ParsedRecordsTableName', {
+      value: parsedRecordsTable.tableName,
+      description: 'DynamoDB table for parsed records',
+      exportName: 'ParsedRecordsTable',
+    });
+
+    new cdk.CfnOutput(this, 'CalculationResultsTableName', {
+      value: calculationResultsTable.tableName,
+      description: 'DynamoDB table for calculation results',
+      exportName: 'CalculationResultsTable',
+    });
+
+    new cdk.CfnOutput(this, 'ProcessQueueUrl', {
+      value: processQueue.queueUrl,
+      description: 'SQS process queue URL',
+      exportName: 'ProcessQueueUrl',
+    });
+
+    new cdk.CfnOutput(this, 'ProcessDlqUrl', {
+      value: processDlq.queueUrl,
+      description: 'SQS dead letter queue URL',
+      exportName: 'ProcessDlqUrl',
+    });
+  }
+}
