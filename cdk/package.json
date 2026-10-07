@@ -1,0 +1,29 @@
+{
+  "name": "pos-pipeline-cdk",
+  "version": "1.0.0",
+  "description": "CDK infrastructure for POS report pipeline",
+  "bin": {
+    "pos-pipeline-cdk": "bin/app.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc -w",
+    "cdk": "cdk",
+    "synth": "cdk synth",
+    "deploy": "cdk deploy",
+    "diff": "cdk diff"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "aws-cdk": "^2.100.0",
+    "typescript": "^5.2.0"
+  },
+  "dependencies": {
+    "aws-cdk-lib": "^2.100.0",
+    "constructs": "^10.3.0",
+    "source-map-support": "^0.5.21"
+  }
+}
