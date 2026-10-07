@@ -1,0 +1,22 @@
+# .NET build artifacts
+bin/
+obj/
+*.dll
+*.pdb
+
+# CDK
+cdk.out/
+node_modules/
+*.js
+*.d.ts
+!cdk/bin/*.ts
+!cdk/lib/*.ts
+
+# Uploads
+uploads/
+
+# IDE
+.vs/
+.vscode/
+*.user
+*.suo
