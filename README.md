@@ -1,5 +1,7 @@
 # POS Report Pipeline
 
+[![CI](https://github.com/victorgzv/pos-flow/actions/workflows/ci.yml/badge.svg)](https://github.com/victorgzv/pos-flow/actions/workflows/ci.yml)
+
 A serverless, event-driven pipeline on AWS that ingests aircraft position (POS) reports over HTTP, stores the raw and parsed data, and works out each flight's remaining flight time, estimated fuel at arrival, and a low-fuel warning in the background. Clients submit a report with `POST /pos-reports`, get a `flightId` back straight away, and poll `GET /status/{flightId}` for the result. The Lambda handlers are written in C# (.NET 8). All infrastructure is defined in AWS CDK (TypeScript). The stack deploys to real AWS and to the free, LocalStack-compatible emulator [Floci](https://github.com/floci-io/floci).
 
 ---
@@ -11,13 +13,14 @@ A serverless, event-driven pipeline on AWS that ingests aircraft position (POS) 
 3. [API reference](#api-reference)
 4. [Data model](#data-model)
 5. [Project structure](#project-structure)
-6. [Prerequisites](#prerequisites)
-7. [Run the unit tests](#run-the-unit-tests)
-8. [Run locally on Floci](#run-locally-on-floci)
-9. [Deploy to AWS](#deploy-to-aws)
-10. [Design decisions and trade-offs](#design-decisions-and-trade-offs)
-11. [Security and production hardening](#security-and-production-hardening)
-12. [Assumptions](#assumptions)
+6. [Testing](#testing)
+7. [Prerequisites](#prerequisites)
+8. [Run the unit tests](#run-the-unit-tests)
+9. [Run locally on Floci](#run-locally-on-floci)
+10. [Deploy to AWS](#deploy-to-aws)
+11. [Design decisions and trade-offs](#design-decisions-and-trade-offs)
+12. [Security and production hardening](#security-and-production-hardening)
+13. [Assumptions](#assumptions)
 
 ---
 
@@ -289,6 +292,47 @@ CDK sets every variable. Each handler checks for its variables in its constructo
     ├── PosPipeline.Status/Function.cs      # GET /status/{flightId}
     └── PosPipeline.Tests/                  # xUnit tests
 ```
+
+---
+
+## Testing
+
+The pipeline has comprehensive test coverage at multiple levels:
+
+### .NET Unit Tests (27 tests)
+
+The C# codebase includes 27 xUnit tests covering core business logic:
+
+- **PosParser (10 tests):** Gold example parsing, coordinate conversion (N/S/E/W hemispheres), invalid message handling, field validation
+- **FlightIdBuilder (3 tests):** Flight ID format generation, date handling, multi-character IATA codes
+- **HaversineCalculator (8 tests):** Distance calculations, flight time estimates, fuel consumption, arrival fuel predictions
+- **AirportLookup (6 tests):** Airport code resolution, case-insensitive lookup, validation
+
+Run with: `cd src && dotnet test`
+
+### CDK Infrastructure Tests (17 tests)
+
+TypeScript tests using `aws-cdk-lib/assertions` verify infrastructure-as-code compliance:
+
+- **API Gateway throttling:** Default limits (10 req/s, 20 burst), context override support
+- **S3 security:** Encryption enabled, public access blocked on all buckets
+- **SQS configuration:** Process queue has DLQ with `maxReceiveCount: 3`, 14-day DLQ retention
+- **DynamoDB schema:** Correct partition and sort keys on both tables
+- **IAM least privilege:** All 4 application Lambda roles have no managed policies, no wildcard actions or resources (CDK helper functions excluded and documented)
+- **CloudWatch Logs:** 4 log groups with 14-day retention
+- **Lambda runtime:** All functions use `dotnet8`
+- **Local mode:** `-c local=true` disables `autoDeleteObjects` custom resource
+
+Run with: `cd cdk && npm test`
+
+### Continuous Integration
+
+GitHub Actions runs all tests on every push and pull request:
+
+- **.NET job:** Restores, builds, and runs 27 unit tests with NuGet caching
+- **CDK job:** Runs TypeScript compilation check (`tsc --noEmit`), 17 infrastructure tests, and `cdk synth` to validate the template
+
+The CI badge at the top of this README shows current build status.
 
 ---
 
