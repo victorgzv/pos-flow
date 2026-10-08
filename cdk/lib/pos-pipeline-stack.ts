@@ -15,11 +15,15 @@ export class PosPipelineStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
 
+    // Local emulator mode (Floci/LocalStack): cdklocal deploy -c local=true
+    // Skips CDK custom resources that can't reach S3 inside the emulator.
+    const isLocal = this.node.tryGetContext('local') === 'true' || this.node.tryGetContext('local') === true;
+
     // ==================== S3 Bucket ====================
     const reportsBucket = new s3.Bucket(this, 'ReportsBucket', {
       bucketName: undefined, // Let CDK generate unique name
       removalPolicy: cdk.RemovalPolicy.DESTROY, // For dev/test; use RETAIN in prod
-      autoDeleteObjects: true, // For dev/test
+      autoDeleteObjects: !isLocal, // For dev/test (disabled on local emulator)
       encryption: s3.BucketEncryption.S3_MANAGED,
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       versioned: false,
