@@ -52,8 +52,31 @@ public class Function
                 var message = JsonSerializer.Deserialize<Dictionary<string, string>>(record.Body);
                 var flightId = message?["flightId"] ?? throw new InvalidOperationException("Missing flightId in message");
                 var attachmentKey = message?["attachmentKey"] ?? throw new InvalidOperationException("Missing attachmentKey in message");
+                var timestamp = message?["timestamp"] ?? throw new InvalidOperationException("Missing timestamp in message");
 
-                // Get parsed POS data from S3
+                // Load parsed record from DynamoDB as the authoritative source
+                var queryResponse = await _dynamoClient.QueryAsync(new QueryRequest
+                {
+                    TableName = _parsedRecordsTable,
+                    KeyConditionExpression = "flightId = :fid AND #ts = :timestamp",
+                    ExpressionAttributeNames = new Dictionary<string, string>
+                    {
+                        ["#ts"] = "timestamp"
+                    },
+                    ExpressionAttributeValues = new Dictionary<string, AttributeValue>
+                    {
+                        [":fid"] = new AttributeValue { S = flightId },
+                        [":timestamp"] = new AttributeValue { S = timestamp }
+                    },
+                    Limit = 1
+                });
+
+                if (queryResponse.Items.Count == 0)
+                    throw new InvalidOperationException($"No parsed record found for flight {flightId} at {timestamp}");
+
+                var parsedRecordAttachment = queryResponse.Items[0]["attachment"].S;
+
+                // Get parsed POS data from S3 attachment (full payload with all fields)
                 var getResponse = await _s3Client.GetObjectAsync(_bucketName, attachmentKey);
                 PosReport? posReport;
                 using (var reader = new StreamReader(getResponse.ResponseStream))
@@ -64,6 +87,8 @@ public class Function
 
                 if (posReport == null)
                     throw new InvalidOperationException("Failed to deserialize PosReport");
+
+                context.Logger.LogInformation($"Loaded parsed record from DynamoDB and attachment from S3 for flight {flightId}");
 
                 context.Logger.LogInformation($"Processing calculation for flight {flightId}");
 
