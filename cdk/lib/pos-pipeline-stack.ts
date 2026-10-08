@@ -97,8 +97,20 @@ export class PosPipelineStack extends cdk.Stack {
       },
     });
 
-    // Grant Ingest Lambda write access to pos/* prefix only
-    reportsBucket.grantPut(ingestFunction, 'pos/*');
+    // Grant Ingest Lambda explicit write access to pos/* prefix only
+    ingestFunction.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['s3:PutObject'],
+      resources: [reportsBucket.arnForObjects('pos/*')],
+    }));
+    ingestFunction.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'logs:CreateLogStream',
+        'logs:PutLogEvents',
+      ],
+      resources: [`arn:aws:logs:${this.region}:${this.account}:log-group:/aws/lambda/${ingestFunction.functionName}:*`],
+    }));
 
     // Parser Lambda
     const parserFunction = new lambda.Function(this, 'ParserFunction', {
@@ -129,11 +141,35 @@ export class PosPipelineStack extends cdk.Stack {
       },
     });
 
-    // Grant Parser Lambda permissions
-    reportsBucket.grantRead(parserFunction, 'pos/*');
-    reportsBucket.grantPut(parserFunction, 'attachment/*');
-    parsedRecordsTable.grantWriteData(parserFunction);
-    processQueue.grantSendMessages(parserFunction);
+    // Grant Parser Lambda explicit permissions
+    parserFunction.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['s3:GetObject'],
+      resources: [reportsBucket.arnForObjects('pos/*')],
+    }));
+    parserFunction.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['s3:PutObject'],
+      resources: [reportsBucket.arnForObjects('attachment/*')],
+    }));
+    parserFunction.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['dynamodb:PutItem'],
+      resources: [parsedRecordsTable.tableArn],
+    }));
+    parserFunction.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['sqs:SendMessage'],
+      resources: [processQueue.queueArn],
+    }));
+    parserFunction.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'logs:CreateLogStream',
+        'logs:PutLogEvents',
+      ],
+      resources: [`arn:aws:logs:${this.region}:${this.account}:log-group:/aws/lambda/${parserFunction.functionName}:*`],
+    }));
 
     // S3 Event notification: ObjectCreated on pos/* prefix -> Parser Lambda
     reportsBucket.addEventNotification(
@@ -171,13 +207,46 @@ export class PosPipelineStack extends cdk.Stack {
       },
     });
 
-    // Grant Calculator Lambda permissions
-    parsedRecordsTable.grantReadData(calculatorFunction);
-    reportsBucket.grantRead(calculatorFunction, 'attachment/*');
-    reportsBucket.grantPut(calculatorFunction, 'results/*');
-    calculationResultsTable.grantWriteData(calculatorFunction);
+    // Grant Calculator Lambda explicit permissions
+    calculatorFunction.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['dynamodb:Query'],
+      resources: [parsedRecordsTable.tableArn],
+    }));
+    calculatorFunction.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['s3:GetObject'],
+      resources: [reportsBucket.arnForObjects('attachment/*')],
+    }));
+    calculatorFunction.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['s3:PutObject'],
+      resources: [reportsBucket.arnForObjects('results/*')],
+    }));
+    calculatorFunction.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['dynamodb:PutItem'],
+      resources: [calculationResultsTable.tableArn],
+    }));
+    calculatorFunction.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'logs:CreateLogStream',
+        'logs:PutLogEvents',
+      ],
+      resources: [`arn:aws:logs:${this.region}:${this.account}:log-group:/aws/lambda/${calculatorFunction.functionName}:*`],
+    }));
 
-    // SQS event source for Calculator Lambda
+    // SQS event source for Calculator Lambda (requires consume permissions)
+    calculatorFunction.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'sqs:ReceiveMessage',
+        'sqs:DeleteMessage',
+        'sqs:GetQueueAttributes',
+      ],
+      resources: [processQueue.queueArn],
+    }));
     calculatorFunction.addEventSource(
       new lambdaEventSources.SqsEventSource(processQueue, {
         batchSize: 10,
@@ -215,11 +284,25 @@ export class PosPipelineStack extends cdk.Stack {
       },
     });
 
-    // Grant Status Lambda permissions
-    parsedRecordsTable.grantReadData(statusFunction);
-    calculationResultsTable.grantReadData(statusFunction);
-    reportsBucket.grantRead(statusFunction, 'results/*');
-    reportsBucket.grantRead(statusFunction, 'attachment/*'); // Optional for future parse details
+    // Grant Status Lambda explicit permissions
+    statusFunction.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['dynamodb:Query'],
+      resources: [parsedRecordsTable.tableArn, calculationResultsTable.tableArn],
+    }));
+    statusFunction.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['s3:GetObject'],
+      resources: [reportsBucket.arnForObjects('results/*')],
+    }));
+    statusFunction.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'logs:CreateLogStream',
+        'logs:PutLogEvents',
+      ],
+      resources: [`arn:aws:logs:${this.region}:${this.account}:log-group:/aws/lambda/${statusFunction.functionName}:*`],
+    }));
 
     // ==================== API Gateway HTTP API ====================
     const httpApi = new apigatewayv2.HttpApi(this, 'PosReportsApi', {
