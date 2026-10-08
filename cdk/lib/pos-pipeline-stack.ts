@@ -20,6 +20,11 @@ export class PosPipelineStack extends cdk.Stack {
     // Skips CDK custom resources that can't reach S3 inside the emulator.
     const isLocal = this.node.tryGetContext('local') === 'true' || this.node.tryGetContext('local') === true;
 
+    // API Gateway throttling configuration
+    // Override with: npx cdk deploy -c throttleRate=10 -c throttleBurst=20
+    const throttleRateLimit = Number(this.node.tryGetContext('throttleRate')) || 10;
+    const throttleBurstLimit = Number(this.node.tryGetContext('throttleBurst')) || 20;
+
     // ==================== S3 Bucket ====================
     const reportsBucket = new s3.Bucket(this, 'ReportsBucket', {
       bucketName: undefined, // Let CDK generate unique name
@@ -349,6 +354,7 @@ export class PosPipelineStack extends cdk.Stack {
     const httpApi = new apigatewayv2.HttpApi(this, 'PosReportsApi', {
       apiName: 'pos-reports-api',
       description: 'API for POS report ingestion and status queries',
+      createDefaultStage: false, // Create explicit stage with throttling
       corsPreflight: {
         allowHeaders: ['Content-Type', 'Authorization'],
         allowMethods: [
@@ -357,6 +363,17 @@ export class PosPipelineStack extends cdk.Stack {
         ],
         allowOrigins: ['*'], // Restrict in production
         maxAge: cdk.Duration.days(1),
+      },
+    });
+
+    // Create $default stage with throttling configuration
+    new apigatewayv2.HttpStage(this, 'DefaultStage', {
+      httpApi: httpApi,
+      stageName: '$default',
+      autoDeploy: true,
+      throttle: {
+        rateLimit: throttleRateLimit,
+        burstLimit: throttleBurstLimit,
       },
     });
 

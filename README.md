@@ -489,7 +489,8 @@ The current stack is ready for evaluation. The gaps below are known and listed o
 - **Authentication:** the API currently has **no authorizer**. Anyone with the URL can call it. Options:
   - a **JWT authorizer** (Amazon Cognito or any OIDC provider) for client applications;
   - **IAM (SigV4) authorization** for service-to-service callers.
-- **Throttling and CORS:** set stage-level rate and burst limits on the HTTP API, and replace the `*` CORS origin with known origins.
+- **Throttling:** the HTTP API Gateway now includes configurable rate limiting (default: 10 req/s rate, 20 burst) on the `$default` stage. When limits are exceeded, API Gateway returns **HTTP 429 Too Many Requests**. Customize via CDK context: `npx cdk deploy -c throttleRate=50 -c throttleBurst=100`. **Note:** Throttling controls request rate only, not authentication or authorization.
+- **CORS:** replace the `*` CORS origin with known origins for production.
 - **Data protection:**
   - switch to `RemovalPolicy.RETAIN` and remove `autoDeleteObjects`;
   - enable DynamoDB point-in-time recovery and S3 versioning;
