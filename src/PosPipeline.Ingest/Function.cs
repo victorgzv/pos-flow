@@ -16,14 +16,12 @@ public class Function
     private readonly IAmazonS3 _s3Client;
     private readonly string _bucketName;
     private readonly PosParser _posParser;
-    private readonly FlightIdBuilder _flightIdBuilder;
 
     public Function()
     {
         _s3Client = new AmazonS3Client();
         _bucketName = Environment.GetEnvironmentVariable("BUCKET_NAME") ?? throw new InvalidOperationException("BUCKET_NAME not set");
         _posParser = new PosParser();
-        _flightIdBuilder = new FlightIdBuilder();
     }
 
     /// <summary>

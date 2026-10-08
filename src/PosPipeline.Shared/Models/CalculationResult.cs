@@ -34,9 +34,4 @@ public class CalculationResult
     /// True if fuel at arrival is negative (low fuel warning)
     /// </summary>
     public bool LowFuelWarning { get; set; }
-
-    /// <summary>
-    /// S3 key to the attachment JSON file (optional for status lookup)
-    /// </summary>
-    public string? AttachmentKey { get; set; }
 }

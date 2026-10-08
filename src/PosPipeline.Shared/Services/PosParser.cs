@@ -1,4 +1,5 @@
 using PosPipeline.Shared.Models;
+using System.Globalization;
 
 namespace PosPipeline.Shared.Services;
 
@@ -67,9 +68,9 @@ public class PosParser
             if (timeString.Length != 6)
                 throw new ArgumentException($"Invalid time format - expected 6 characters (ddHHmm), got {timeString.Length}");
 
-            int day = int.Parse(timeString.Substring(0, 2));
-            int hour = int.Parse(timeString.Substring(2, 2));
-            int minute = int.Parse(timeString.Substring(4, 2));
+            int day = int.Parse(timeString.Substring(0, 2), CultureInfo.InvariantCulture);
+            int hour = int.Parse(timeString.Substring(2, 2), CultureInfo.InvariantCulture);
+            int minute = int.Parse(timeString.Substring(4, 2), CultureInfo.InvariantCulture);
 
             // Construct timestamp: use message day + request year/month
             var timestamp = new DateTime(
@@ -107,13 +108,13 @@ public class PosParser
             double longitude = ParseLongitude(lonString);
 
             // Part 5: Ground speed in knots
-            int groundSpeedKnots = int.Parse(parts[5]);
+            int groundSpeedKnots = int.Parse(parts[5], CultureInfo.InvariantCulture);
 
             // Part 6: Fuel on board in kg
-            int fuelOnBoardKg = int.Parse(parts[6]);
+            int fuelOnBoardKg = int.Parse(parts[6], CultureInfo.InvariantCulture);
 
             // Part 7: Fuel flow in kg/hour
-            int fuelFlowKgPerHour = int.Parse(parts[7]);
+            int fuelFlowKgPerHour = int.Parse(parts[7], CultureInfo.InvariantCulture);
 
             // Build flight ID
             var flightIdBuilder = new FlightIdBuilder();
@@ -161,8 +162,8 @@ public class PosParser
         if (coordPart.Length < 2)
             throw new ArgumentException("Latitude must have at least 2-digit degrees");
 
-        int degrees = int.Parse(coordPart.Substring(0, 2));
-        double minutes = coordPart.Length > 2 ? double.Parse(coordPart.Substring(2)) : 0.0;
+        int degrees = int.Parse(coordPart.Substring(0, 2), CultureInfo.InvariantCulture);
+        double minutes = coordPart.Length > 2 ? double.Parse(coordPart.Substring(2), CultureInfo.InvariantCulture) : 0.0;
 
         // Convert to decimal degrees
         double decimalDegrees = degrees + (minutes / 60.0);
@@ -192,8 +193,8 @@ public class PosParser
         if (coordPart.Length < 3)
             throw new ArgumentException("Longitude must have at least 3-digit degrees");
 
-        int degrees = int.Parse(coordPart.Substring(0, 3));
-        double minutes = coordPart.Length > 3 ? double.Parse(coordPart.Substring(3)) : 0.0;
+        int degrees = int.Parse(coordPart.Substring(0, 3), CultureInfo.InvariantCulture);
+        double minutes = coordPart.Length > 3 ? double.Parse(coordPart.Substring(3), CultureInfo.InvariantCulture) : 0.0;
 
         // Convert to decimal degrees
         double decimalDegrees = degrees + (minutes / 60.0);

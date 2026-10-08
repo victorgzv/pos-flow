@@ -496,8 +496,9 @@ The current stack is ready for evaluation. The gaps below are known and listed o
   - add `enforceSSL` on the bucket;
   - consider customer-managed KMS keys.
 - **Tighter IAM:**
-  - replace the CDK grant helpers with explicit policy statements listing the exact actions (e.g. only `s3:GetObject`/`s3:PutObject`, `dynamodb:Query`/`PutItem`);
-  - remove grants the code does not currently use (Calculator's `ParsedRecords` read, Status's `attachment/*` read).
+  - All data-plane permissions already use explicit actions (no wildcards) and scoped resource ARNs
+  - CloudWatch Logs permissions are scoped to each function's log group
+  - All grants match actual code paths (unused grants have been removed)
 - **Failure visibility:**
   - CloudWatch alarm on DLQ depth (`ApproximateNumberOfMessagesVisible > 0`), plus Lambda error and throttle alarms;
   - an on-failure destination or DLQ for the Parser's asynchronous invocation;
