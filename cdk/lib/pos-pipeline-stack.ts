@@ -3,6 +3,7 @@ import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
+import * as logs from 'aws-cdk-lib/aws-logs';
 import * as apigatewayv2 from 'aws-cdk-lib/aws-apigatewayv2';
 import * as apigatewayv2Integrations from 'aws-cdk-lib/aws-apigatewayv2-integrations';
 import * as s3n from 'aws-cdk-lib/aws-s3-notifications';
@@ -70,11 +71,35 @@ export class PosPipelineStack extends cdk.Stack {
     // Path to the published Lambda packages (will be built from src/)
     const lambdaCodePath = path.join(__dirname, '../../src');
 
-    // Ingest Lambda
+    // Ingest Lambda - log group and role
+    const ingestLogGroup = new logs.LogGroup(this, 'IngestLogGroup', {
+      logGroupName: '/aws/lambda/pos-pipeline-ingest',
+      retention: logs.RetentionDays.TWO_WEEKS,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+
+    const ingestRole = new iam.Role(this, 'IngestRole', {
+      assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
+    });
+
+    ingestRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['s3:PutObject'],
+      resources: [reportsBucket.arnForObjects('pos/*')],
+    }));
+
+    ingestRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['logs:CreateLogStream', 'logs:PutLogEvents'],
+      resources: [ingestLogGroup.logGroupArn],
+    }));
+
     const ingestFunction = new lambda.Function(this, 'IngestFunction', {
       functionName: 'pos-pipeline-ingest',
       runtime: lambda.Runtime.DOTNET_8,
       handler: 'PosPipeline.Ingest::PosPipeline.Ingest.Function::FunctionHandler',
+      role: ingestRole,
+      logGroup: ingestLogGroup,
       code: lambda.Code.fromAsset(lambdaCodePath, {
         bundling: {
           image: lambda.Runtime.DOTNET_8.bundlingImage,
@@ -97,26 +122,53 @@ export class PosPipelineStack extends cdk.Stack {
       },
     });
 
-    // Grant Ingest Lambda explicit write access to pos/* prefix only
-    ingestFunction.addToRolePolicy(new iam.PolicyStatement({
+    // Parser Lambda - log group and role
+    const parserLogGroup = new logs.LogGroup(this, 'ParserLogGroup', {
+      logGroupName: '/aws/lambda/pos-pipeline-parser',
+      retention: logs.RetentionDays.TWO_WEEKS,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+
+    const parserRole = new iam.Role(this, 'ParserRole', {
+      assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
+    });
+
+    parserRole.addToPolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
-      actions: ['s3:PutObject'],
+      actions: ['s3:GetObject'],
       resources: [reportsBucket.arnForObjects('pos/*')],
     }));
-    ingestFunction.addToRolePolicy(new iam.PolicyStatement({
+
+    parserRole.addToPolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
-      actions: [
-        'logs:CreateLogStream',
-        'logs:PutLogEvents',
-      ],
-      resources: [`arn:aws:logs:${this.region}:${this.account}:log-group:/aws/lambda/${ingestFunction.functionName}:*`],
+      actions: ['s3:PutObject'],
+      resources: [reportsBucket.arnForObjects('attachment/*')],
     }));
 
-    // Parser Lambda
+    parserRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['dynamodb:PutItem'],
+      resources: [parsedRecordsTable.tableArn],
+    }));
+
+    parserRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['sqs:SendMessage'],
+      resources: [processQueue.queueArn],
+    }));
+
+    parserRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['logs:CreateLogStream', 'logs:PutLogEvents'],
+      resources: [parserLogGroup.logGroupArn],
+    }));
+
     const parserFunction = new lambda.Function(this, 'ParserFunction', {
       functionName: 'pos-pipeline-parser',
       runtime: lambda.Runtime.DOTNET_8,
       handler: 'PosPipeline.Parser::PosPipeline.Parser.Function::FunctionHandler',
+      role: parserRole,
+      logGroup: parserLogGroup,
       code: lambda.Code.fromAsset(lambdaCodePath, {
         bundling: {
           image: lambda.Runtime.DOTNET_8.bundlingImage,
@@ -141,36 +193,6 @@ export class PosPipelineStack extends cdk.Stack {
       },
     });
 
-    // Grant Parser Lambda explicit permissions
-    parserFunction.addToRolePolicy(new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      actions: ['s3:GetObject'],
-      resources: [reportsBucket.arnForObjects('pos/*')],
-    }));
-    parserFunction.addToRolePolicy(new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      actions: ['s3:PutObject'],
-      resources: [reportsBucket.arnForObjects('attachment/*')],
-    }));
-    parserFunction.addToRolePolicy(new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      actions: ['dynamodb:PutItem'],
-      resources: [parsedRecordsTable.tableArn],
-    }));
-    parserFunction.addToRolePolicy(new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      actions: ['sqs:SendMessage'],
-      resources: [processQueue.queueArn],
-    }));
-    parserFunction.addToRolePolicy(new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      actions: [
-        'logs:CreateLogStream',
-        'logs:PutLogEvents',
-      ],
-      resources: [`arn:aws:logs:${this.region}:${this.account}:log-group:/aws/lambda/${parserFunction.functionName}:*`],
-    }));
-
     // S3 Event notification: ObjectCreated on pos/* prefix -> Parser Lambda
     reportsBucket.addEventNotification(
       s3.EventType.OBJECT_CREATED,
@@ -178,11 +200,59 @@ export class PosPipelineStack extends cdk.Stack {
       { prefix: 'pos/' }
     );
 
-    // Calculator Lambda
+    // Calculator Lambda - log group and role
+    const calculatorLogGroup = new logs.LogGroup(this, 'CalculatorLogGroup', {
+      logGroupName: '/aws/lambda/pos-pipeline-calculator',
+      retention: logs.RetentionDays.TWO_WEEKS,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+
+    const calculatorRole = new iam.Role(this, 'CalculatorRole', {
+      assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
+    });
+
+    calculatorRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['dynamodb:Query'],
+      resources: [parsedRecordsTable.tableArn],
+    }));
+
+    calculatorRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['s3:GetObject'],
+      resources: [reportsBucket.arnForObjects('attachment/*')],
+    }));
+
+    calculatorRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['s3:PutObject'],
+      resources: [reportsBucket.arnForObjects('results/*')],
+    }));
+
+    calculatorRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['dynamodb:PutItem'],
+      resources: [calculationResultsTable.tableArn],
+    }));
+
+    calculatorRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['sqs:ReceiveMessage', 'sqs:DeleteMessage', 'sqs:GetQueueAttributes'],
+      resources: [processQueue.queueArn],
+    }));
+
+    calculatorRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['logs:CreateLogStream', 'logs:PutLogEvents'],
+      resources: [calculatorLogGroup.logGroupArn],
+    }));
+
     const calculatorFunction = new lambda.Function(this, 'CalculatorFunction', {
       functionName: 'pos-pipeline-calculator',
       runtime: lambda.Runtime.DOTNET_8,
       handler: 'PosPipeline.Calculator::PosPipeline.Calculator.Function::FunctionHandler',
+      role: calculatorRole,
+      logGroup: calculatorLogGroup,
       code: lambda.Code.fromAsset(lambdaCodePath, {
         bundling: {
           image: lambda.Runtime.DOTNET_8.bundlingImage,
@@ -207,46 +277,7 @@ export class PosPipelineStack extends cdk.Stack {
       },
     });
 
-    // Grant Calculator Lambda explicit permissions
-    calculatorFunction.addToRolePolicy(new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      actions: ['dynamodb:Query'],
-      resources: [parsedRecordsTable.tableArn],
-    }));
-    calculatorFunction.addToRolePolicy(new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      actions: ['s3:GetObject'],
-      resources: [reportsBucket.arnForObjects('attachment/*')],
-    }));
-    calculatorFunction.addToRolePolicy(new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      actions: ['s3:PutObject'],
-      resources: [reportsBucket.arnForObjects('results/*')],
-    }));
-    calculatorFunction.addToRolePolicy(new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      actions: ['dynamodb:PutItem'],
-      resources: [calculationResultsTable.tableArn],
-    }));
-    calculatorFunction.addToRolePolicy(new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      actions: [
-        'logs:CreateLogStream',
-        'logs:PutLogEvents',
-      ],
-      resources: [`arn:aws:logs:${this.region}:${this.account}:log-group:/aws/lambda/${calculatorFunction.functionName}:*`],
-    }));
-
-    // SQS event source for Calculator Lambda (requires consume permissions)
-    calculatorFunction.addToRolePolicy(new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      actions: [
-        'sqs:ReceiveMessage',
-        'sqs:DeleteMessage',
-        'sqs:GetQueueAttributes',
-      ],
-      resources: [processQueue.queueArn],
-    }));
+    // SQS event source for Calculator Lambda
     calculatorFunction.addEventSource(
       new lambdaEventSources.SqsEventSource(processQueue, {
         batchSize: 10,
@@ -255,11 +286,41 @@ export class PosPipelineStack extends cdk.Stack {
       })
     );
 
-    // Status Lambda
+    // Status Lambda - log group and role
+    const statusLogGroup = new logs.LogGroup(this, 'StatusLogGroup', {
+      logGroupName: '/aws/lambda/pos-pipeline-status',
+      retention: logs.RetentionDays.TWO_WEEKS,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+
+    const statusRole = new iam.Role(this, 'StatusRole', {
+      assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
+    });
+
+    statusRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['dynamodb:Query'],
+      resources: [parsedRecordsTable.tableArn, calculationResultsTable.tableArn],
+    }));
+
+    statusRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['s3:GetObject'],
+      resources: [reportsBucket.arnForObjects('results/*')],
+    }));
+
+    statusRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['logs:CreateLogStream', 'logs:PutLogEvents'],
+      resources: [statusLogGroup.logGroupArn],
+    }));
+
     const statusFunction = new lambda.Function(this, 'StatusFunction', {
       functionName: 'pos-pipeline-status',
       runtime: lambda.Runtime.DOTNET_8,
       handler: 'PosPipeline.Status::PosPipeline.Status.Function::FunctionHandler',
+      role: statusRole,
+      logGroup: statusLogGroup,
       code: lambda.Code.fromAsset(lambdaCodePath, {
         bundling: {
           image: lambda.Runtime.DOTNET_8.bundlingImage,
@@ -283,26 +344,6 @@ export class PosPipelineStack extends cdk.Stack {
         CALCULATION_RESULTS_TABLE: calculationResultsTable.tableName,
       },
     });
-
-    // Grant Status Lambda explicit permissions
-    statusFunction.addToRolePolicy(new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      actions: ['dynamodb:Query'],
-      resources: [parsedRecordsTable.tableArn, calculationResultsTable.tableArn],
-    }));
-    statusFunction.addToRolePolicy(new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      actions: ['s3:GetObject'],
-      resources: [reportsBucket.arnForObjects('results/*')],
-    }));
-    statusFunction.addToRolePolicy(new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      actions: [
-        'logs:CreateLogStream',
-        'logs:PutLogEvents',
-      ],
-      resources: [`arn:aws:logs:${this.region}:${this.account}:log-group:/aws/lambda/${statusFunction.functionName}:*`],
-    }));
 
     // ==================== API Gateway HTTP API ====================
     const httpApi = new apigatewayv2.HttpApi(this, 'PosReportsApi', {

@@ -455,16 +455,16 @@ The bucket and both tables use `RemovalPolicy.DESTROY`, and the bucket also has 
 
 **Status built from DynamoDB and S3.** Status checks `CalculationResults` first. If a row exists, it loads the `results/` object and returns `COMPLETE`. If not, it falls back to `ParsedRecords` and returns `PROCESSING`, and if neither has a row it returns 404. This avoids copying calculation fields into DynamoDB.
 
-**Least-privilege IAM with explicit grants.** Each function has its own role and only the exact actions it needs, with no wildcard actions on application resources:
+**Least-privilege IAM with explicit roles and scoped log groups.** Each function has its own explicitly-created IAM role with no AWS managed policies attached. CloudWatch log groups are created explicitly for each function with 2-week retention, and logs permissions are scoped to each function's specific log group ARN (no wildcards):
 
-| Function | S3 (scoped by prefix) | DynamoDB | SQS |
-|---|---|---|---|
-| Ingest | `PutObject` on `pos/*` | none | none |
-| Parser | `GetObject` on `pos/*`, `PutObject` on `attachment/*` | `PutItem` on `ParsedRecords` | `SendMessage` to processing queue |
-| Calculator | `GetObject` on `attachment/*`, `PutObject` on `results/*` | `Query` on `ParsedRecords`, `PutItem` on `CalculationResults` | `ReceiveMessage`, `DeleteMessage`, `GetQueueAttributes` on processing queue (event source) |
-| Status | `GetObject` on `results/*` | `Query` on `ParsedRecords` and `CalculationResults` | none |
+| Function | S3 (scoped by prefix) | DynamoDB | SQS | CloudWatch Logs |
+|---|---|---|---|---|
+| Ingest | `PutObject` on `pos/*` | none | none | `CreateLogStream`, `PutLogEvents` on `/aws/lambda/pos-pipeline-ingest` |
+| Parser | `GetObject` on `pos/*`, `PutObject` on `attachment/*` | `PutItem` on `ParsedRecords` | `SendMessage` to processing queue | `CreateLogStream`, `PutLogEvents` on `/aws/lambda/pos-pipeline-parser` |
+| Calculator | `GetObject` on `attachment/*`, `PutObject` on `results/*` | `Query` on `ParsedRecords`, `PutItem` on `CalculationResults` | `ReceiveMessage`, `DeleteMessage`, `GetQueueAttributes`, `ChangeMessageVisibility`, `GetQueueUrl` on processing queue (event source) | `CreateLogStream`, `PutLogEvents` on `/aws/lambda/pos-pipeline-calculator` |
+| Status | `GetObject` on `results/*` | `Query` on `ParsedRecords` and `CalculationResults` | none | `CreateLogStream`, `PutLogEvents` on `/aws/lambda/pos-pipeline-status` |
 
-All IAM policies use explicit `addToRolePolicy` statements with exact actions and resource ARNs scoped to specific bucket prefixes and table names. CloudWatch Logs permissions are scoped to each function's log group. The S3 notification is filtered to the `pos/` prefix only.
+All IAM policies use explicit `role.addToPolicy` statements with exact actions and resource ARNs scoped to specific bucket prefixes, table names, and log group ARNs. No AWS managed policies such as `AWSLambdaBasicExecutionRole` are attached to application Lambda roles. The S3 notification is filtered to the `pos/` prefix only.
 
 **One shared library, four functions.** Parsing, the `flightId` rule, haversine and the airport lookup live in `PosPipeline.Shared`. Every Lambda and the test suite use that one implementation, so they cannot drift apart. Each step is still a separate function with its own role, timeout and scaling.
 
@@ -495,10 +495,10 @@ The current stack is ready for evaluation. The gaps below are known and listed o
   - enable DynamoDB point-in-time recovery and S3 versioning;
   - add `enforceSSL` on the bucket;
   - consider customer-managed KMS keys.
-- **Tighter IAM:**
-  - All data-plane permissions already use explicit actions (no wildcards) and scoped resource ARNs
-  - CloudWatch Logs permissions are scoped to each function's log group
-  - All grants match actual code paths (unused grants have been removed)
+- **IAM hardening:**
+  - Application Lambda roles are already created explicitly with no managed policies and scoped permissions
+  - CloudWatch Logs permissions are already scoped to each function's specific log group
+  - Note: CDK-managed infrastructure helpers (`BucketNotificationsHandler` for S3 events and `CustomS3AutoDeleteObjectsCustomResourceProvider` for bucket cleanup) use `AWSLambdaBasicExecutionRole` managed policy; these are transient CDK implementation details and do not process application data
 - **Failure visibility:**
   - CloudWatch alarm on DLQ depth (`ApproximateNumberOfMessagesVisible > 0`), plus Lambda error and throttle alarms;
   - an on-failure destination or DLQ for the Parser's asynchronous invocation;
