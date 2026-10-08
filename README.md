@@ -1,262 +1,526 @@
-# POS Report Processing Pipeline
+# POS Report Pipeline
 
-AWS serverless pipeline for processing aircraft Position (POS) reports with automatic distance, time, and fuel calculations.
+A serverless, event-driven pipeline on AWS that ingests aircraft position (POS) reports over HTTP, stores the raw and parsed data, and works out each flight's remaining flight time, estimated fuel at arrival, and a low-fuel warning in the background. Clients submit a report with `POST /pos-reports`, get a `flightId` back straight away, and poll `GET /status/{flightId}` for the result. The Lambda handlers are written in C# (.NET 8). All infrastructure is defined in AWS CDK (TypeScript). The stack deploys to real AWS and to the free, LocalStack-compatible emulator [Floci](https://github.com/floci-io/floci).
 
-## Overview
+---
 
-This system receives POS reports via HTTP API, parses and validates them, calculates remaining flight time and fuel, and provides status lookups. Built entirely with AWS serverless technologies (Lambda, S3, DynamoDB, SQS, API Gateway).
+## Table of contents
 
-### Key Features
+1. [Architecture](#architecture)
+2. [POS message format](#pos-message-format)
+3. [API reference](#api-reference)
+4. [Data model](#data-model)
+5. [Project structure](#project-structure)
+6. [Prerequisites](#prerequisites)
+7. [Run the unit tests](#run-the-unit-tests)
+8. [Run locally on Floci](#run-locally-on-floci)
+9. [Deploy to AWS](#deploy-to-aws)
+10. [Design decisions and trade-offs](#design-decisions-and-trade-offs)
+11. [Security and production hardening](#security-and-production-hardening)
+12. [Assumptions](#assumptions)
 
-- **HTTP API for ingestion**: POST /pos-reports
-- **Async processing pipeline**: S3 → Lambda (Parser) → SQS → Lambda (Calculator)
-- **Status endpoint**: GET /status/{flightId}
-- **DynamoDB persistence**: Separate tables for parsed records and calculation results
-- **Least-privilege IAM**: Scoped permissions per Lambda, no wildcards
-- **Dead letter queue**: Failed calculations retry 3 times then move to DLQ
+---
 
 ## Architecture
 
-```
-Client → API Gateway
-  ├─ POST /pos-reports → Ingest Lambda → S3 pos/
-  │
-  ├─ S3 Event (pos/*) → Parser Lambda
-  │     → S3 attachment/ (JSON)
-  │     → DynamoDB ParsedRecords
-  │     → SQS ProcessQueue
-  │
-  ├─ SQS → Calculator Lambda
-  │     → Haversine + fuel calculation
-  │     → S3 results/
-  │     → DynamoDB CalculationResults
-  │
-  └─ GET /status/{flightId} → Status Lambda
-        → Query DynamoDB (latest calc + parse)
-        → GetObject from S3 results/
-        → Return status JSON
-```
+```mermaid
+flowchart LR
+    client([Client])
 
-See [ARCHITECTURE.md](./ARCHITECTURE.md) for detailed design documentation.
+    subgraph api[API Gateway HTTP API]
+        post["POST /pos-reports"]
+        get["GET /status/{flightId}"]
+    end
 
-## Repository Layout
+    subgraph s3[S3 reports bucket]
+        pos[("pos/")]
+        att[("attachment/")]
+        res[("results/")]
+    end
 
-```
-pos-pipeline/
-  README.md
-  ARCHITECTURE.md
-  
-  cdk/                           # TypeScript CDK infrastructure
-    bin/app.ts                   # CDK app entry point
-    lib/pos-pipeline-stack.ts    # Main stack with all resources
-    package.json
-    cdk.json
-    tsconfig.json
-  
-  src/                           # C# Lambda functions + shared library
-    PosPipeline.sln              # .NET solution
-    PosPipeline.Shared/          # Models, parser, Haversine, airport lookup
-    PosPipeline.Ingest/          # Ingest Lambda (POST /pos-reports)
-    PosPipeline.Parser/          # Parser Lambda (S3 → DDB + SQS)
-    PosPipeline.Calculator/      # Calculator Lambda (SQS → calculations)
-    PosPipeline.Status/          # Status Lambda (GET /status/{flightId})
-    PosPipeline.Tests/           # xUnit tests (gold example)
-  
-  scripts/                       # Sample data + curl commands
-    sample-pos.txt
-    example-commands.sh
-    README.md
+    subgraph ddb[DynamoDB]
+        parsed[("ParsedRecords<br/>PK flightId · SK timestamp")]
+        calc[("CalculationResults<br/>PK flightId · SK timestamp")]
+    end
+
+    queue[["SQS pos-pipeline-process-queue"]]
+    dlq[["SQS pos-pipeline-process-dlq"]]
+
+    ingest["Ingest λ"]
+    parser["Parser λ"]
+    calculator["Calculator λ"]
+    status["Status λ"]
+
+    client --> post --> ingest
+    ingest -- "PutObject raw text" --> pos
+    pos -- "ObjectCreated (prefix pos/)" --> parser
+    parser -- "parsed JSON" --> att
+    parser -- PutItem --> parsed
+    parser -- SendMessage --> queue
+    queue -- "event source mapping" --> calculator
+    queue -. "after 3 failed receives" .-> dlq
+    calculator -- "GetObject" --> att
+    calculator -- "result JSON" --> res
+    calculator -- PutItem --> calc
+
+    client --> get --> status
+    status -- Query --> calc
+    status -- Query --> parsed
+    status -- GetObject --> res
 ```
 
-## Technology Stack
+**Request flow**
 
-- **Infrastructure**: AWS CDK (TypeScript)
-- **Runtime**: C# .NET 8 Lambda functions
-- **AWS Services**:
-  - API Gateway HTTP API
-  - Lambda (4 functions)
-  - S3 (raw, attachment, results)
-  - DynamoDB (2 tables)
-  - SQS + DLQ
-- **Testing**: xUnit
+1. **Ingest** checks the raw text, builds the `flightId`, writes the message to `pos/` and returns **202 RECEIVED**. It does no other processing.
+2. The S3 `ObjectCreated` notification, filtered to the `pos/` prefix, triggers **Parser**. Parser decodes the message and then, in order, writes the parsed JSON to `attachment/`, puts a row in `ParsedRecords` and sends a message to the processing queue.
+3. **Calculator** reads the parsed JSON, looks up the destination airport and runs the haversine distance, time and fuel calculations. It writes the result JSON to `results/` and puts a row in `CalculationResults`. If a message fails, only that message is retried (partial batch response). After 3 receives it moves to the DLQ.
+4. **Status** builds the response from DynamoDB plus the result object in S3 (see [GET /status](#get-statusflightid)).
 
-## Local Development
+### Components
 
-### Prerequisites
+| Component | Resource (as defined in CDK) | Configuration |
+|---|---|---|
+| HTTP API | `pos-reports-api` (API Gateway v2) | Routes `POST /pos-reports`, `GET /status/{flightId}`. CORS for `GET`/`POST` |
+| Ingest Lambda | `pos-pipeline-ingest` | .NET 8, 512 MB, 30 s timeout |
+| Parser Lambda | `pos-pipeline-parser` | .NET 8, 512 MB, 60 s timeout. Triggered by S3 `ObjectCreated` on `pos/` |
+| Calculator Lambda | `pos-pipeline-calculator` | .NET 8, 512 MB, 60 s timeout. SQS batch size 10, batching window 5 s, `reportBatchItemFailures` |
+| Status Lambda | `pos-pipeline-status` | .NET 8, 512 MB, 30 s timeout |
+| Reports bucket | S3 (name generated by CDK) | SSE-S3 encryption, all public access blocked, prefixes `pos/`, `attachment/`, `results/` |
+| `ParsedRecords` | DynamoDB | PK `flightId` (S), SK `timestamp` (S), on-demand billing |
+| `CalculationResults` | DynamoDB | PK `flightId` (S), SK `timestamp` (S), on-demand billing |
+| Processing queue | `pos-pipeline-process-queue` | Visibility timeout 180 s (3 × Calculator timeout), long polling 20 s, SQS-managed SSE, `maxReceiveCount: 3` → DLQ |
+| Dead-letter queue | `pos-pipeline-process-dlq` | 14-day retention, SQS-managed SSE |
 
-- .NET 8 SDK
-- Node.js 20+ (for CDK)
-- AWS CLI configured (for deployment)
+**Stack outputs:** `ApiUrl`, `BucketName`, `ParsedRecordsTableName`, `CalculationResultsTableName`, `ProcessQueueUrl`, `ProcessDlqUrl`.
 
-### Build and Test
+---
 
-```bash
-# Build the .NET solution
-cd src
-dotnet restore
-dotnet build
-
-# Run unit tests
-dotnet test
-
-# Expected: Tests pass or are marked Skip/Fail with TODO
-# Gold example tests verify:
-# - POS parsing (lat 16.705, lon 96.2083)
-# - Flight ID generation (UL20420260904RGNBKK)
-# - Haversine distance (~319 NM)
-# - Flight time (~43 minutes)
-# - Fuel at arrival (~10,513 kg)
-```
-
-### CDK Infrastructure
-
-```bash
-# Install CDK dependencies
-cd cdk
-npm install
-
-# Build TypeScript
-npm run build
-
-# Synthesize CloudFormation template
-# Note: Requires Docker for .NET Lambda bundling
-# In environments without Docker, synth will fail at Lambda bundling stage
-# but the CDK code itself is valid
-npx cdk synth
-
-# Deploy to AWS (requires credentials + bootstrap)
-npx cdk deploy
-
-# After deployment, note the API URL from outputs
-```
-
-**CDK Bundling Note**: The stack uses CDK's built-in .NET bundling which requires Docker to run `dotnet publish` in a container. The infrastructure code is correct and will deploy successfully in environments with Docker (local development, CI/CD). If `npx cdk synth` fails with "docker ENOENT", Docker is not available - this is expected in some cloud/container environments.
-
-## Deployment
-
-1. **Bootstrap CDK** (one-time per account/region):
-   ```bash
-   npx cdk bootstrap
-   ```
-
-2. **Deploy stack**:
-   ```bash
-   cd cdk
-   npx cdk deploy
-   ```
-
-3. **Note the API endpoint** from stack outputs:
-   ```
-   Outputs:
-   PosPipelineStack.ApiUrl = https://xyz.execute-api.us-east-1.amazonaws.com
-   ```
-
-4. **Test with sample data**:
-   ```bash
-   cd scripts
-   # Update API_URL in example-commands.sh
-   ./example-commands.sh
-   ```
-
-## API Usage
-
-### Submit POS Report
-
-```bash
-POST /pos-reports
-Content-Type: text/plain
-
-POS/UL204.FR RGN/TO BKK/041205/N1642.3E09612.5/450/12500/2800
-```
-
-Response (202 Accepted):
-```json
-{
-  "flightId": "UL20420260904RGNBKK",
-  "status": "RECEIVED",
-  "timestamp": "2026-09-04T12:05:00Z"
-}
-```
-
-### Query Status
-
-```bash
-GET /status/{flightId}
-```
-
-Response states:
-- **PROCESSING**: Parsed but calculation not complete
-- **COMPLETE**: Full calculation available
-- **404**: Flight not found
-
-Complete response example:
-```json
-{
-  "flightId": "UL20420260904RGNBKK",
-  "status": "COMPLETE",
-  "timestamp": "2026-09-04T12:05:23Z",
-  "remainingFlightTimeMinutes": 43,
-  "estimatedFuelAtArrivalKg": 10513,
-  "lowFuelWarning": false
-}
-```
-
-## POS Format
+## POS message format
 
 ```
-POS/{IATA}{number}.FR {departure}/TO {destination}/{ddHHmm}/{lat}{N|S}{lon}{E|W}/{groundSpeed}/{fuelOnBoard}/{fuelFlow}
+POS/{IATA}{flightNumber}.FR {departure}/TO {destination}/{ddHHmm}/{lat}{lon}/{groundSpeedKnots}/{fuelOnBoardKg}/{fuelFlowKgPerHour}
 ```
 
 Example:
+
 ```
 POS/UL204.FR RGN/TO BKK/041205/N1642.3E09612.5/450/12500/2800
 ```
 
-- **Latitude**: Hemisphere + 2-digit degrees + decimal minutes (N1642.3 → 16.705°)
-- **Longitude**: Hemisphere + 3-digit degrees + decimal minutes (E09612.5 → 96.2083°)
-- **Date**: Day from message + year/month from request timestamp (UTC)
+| Segment | Example | Meaning and parsing rule |
+|---|---|---|
+| `POS` | `POS` | Literal prefix (not case-sensitive) |
+| `{IATA}{flightNumber}.FR {departure}` | `UL204.FR RGN` | Airline code = the characters before the first digit (`UL`). Flight number = the rest (`204`). Departure airport follows `.FR ` (`RGN`) |
+| `TO {destination}` | `TO BKK` | Destination airport (`BKK`) |
+| `{ddHHmm}` | `041205` | Day 04, 12:05 UTC. Year and month come from the time the request was received (UTC) |
+| `{lat}{lon}` | `N1642.3E09612.5` | Latitude: `N`/`S` + **2-digit** degrees + decimal minutes. Longitude: `E`/`W` + **3-digit** degrees + decimal minutes. Decimal degrees = degrees + minutes / 60. `S` and `W` are negative. Here: 16.705, 96.2083 |
+| `{groundSpeedKnots}` | `450` | Ground speed (kt), integer |
+| `{fuelOnBoardKg}` | `12500` | Fuel on board (kg), integer |
+| `{fuelFlowKgPerHour}` | `2800` | Fuel flow (kg/h), integer |
 
-## Implementation Status
+### flightId
 
-### ✅ Complete
-- CDK infrastructure with all resources
-- Lambda function stubs (compile and deploy)
-- Shared models and service interfaces
-- Test project structure with gold example tests
-- IAM least-privilege policies (no wildcards)
-- S3 event notification scoped to pos/ prefix
-- SQS with DLQ (maxReceiveCount=3)
-- API Gateway routes
+```
+{IATA}{flightNumber}{yyyyMMdd}{departure}{destination}      (no separators)
+```
 
-### 🚧 TODO (Marked in code)
-- Full POS parsing implementation (lat/lon conversion)
-- Complete Haversine formula
-- Date parsing edge cases
-- Integration tests
+`yyyy` and `MM` are the UTC year and month when the report was received. `dd` is the day in the message. A report sent in October 2026 with day `04` gives **`UL20420261004RGNBKK`**.
 
-The scaffolded code compiles and deploys but uses stub implementations for parsing and calculations. Unit tests reference the gold example expectations.
+### Calculation
 
-## Key Design Decisions
+| Step | Formula | Gold example (RGN → BKK) |
+|---|---|---|
+| Distance | Haversine, `EarthRadiusNauticalMiles = 3440.065` | ≈ 319.5 NM to BKK (13.681, 100.747) |
+| Remaining time | `distance / groundSpeed`, minutes rounded to the nearest integer | **43 min** |
+| Fuel at arrival | `fuelOnBoard − fuelFlow × hours`, rounded to the nearest kg | **10512 kg** |
+| Low-fuel warning | `true` when fuel at arrival is negative | `false` |
 
-1. **Async pipeline**: Ingest returns 202 immediately; processing happens asynchronously via S3 events and SQS
-2. **Separate tables**: ParsedRecords and CalculationResults keep concerns separate; Status queries both
-3. **S3 for payloads**: DynamoDB stores only metadata + S3 keys; Status reads full JSON from S3 results/
-4. **Static airport lookup**: RGN, BKK, SIN hardcoded (sufficient for assessment scope)
-5. **HTTP API**: Simpler and cheaper than REST API for this use case
-6. **Rounding**: Flight time as integer minutes; fuel as integer kg (matches spec example)
+---
 
-## CDK Packaging
+## API reference
 
-C# Lambdas are packaged using CDK's built-in .NET bundling:
-- `lambda.Code.fromAsset()` with `bundling` config
-- Runs `dotnet publish` in a container
-- Output directory becomes the Lambda deployment package
-- Each Lambda project references `PosPipeline.Shared` for shared code
+All responses are JSON (`Content-Type: application/json`). Field names are PascalCase, which is the default for `System.Text.Json`.
 
-## Confidentiality
+### `POST /pos-reports`
 
-This is an assessment project. Architecture details are documented but client-specific requirements are not disclosed in public repositories.
+Send the raw POS text as the request body.
 
-## License
+```bash
+curl -i -X POST "$API_URL/pos-reports" \
+  -H "Content-Type: text/plain" \
+  --data 'POS/UL204.FR RGN/TO BKK/041205/N1642.3E09612.5/450/12500/2800'
+```
 
-Private assessment project - not for distribution.
+**202 Accepted**
+
+```json
+{ "FlightId": "UL20420261004RGNBKK", "Status": "RECEIVED", "Timestamp": "<request time, UTC>" }
+```
+
+| Status | When | Body |
+|---|---|---|
+| `202` | Message accepted and stored in `pos/` | `FlightId`, `Status: "RECEIVED"`, `Timestamp` |
+| `400` | Empty body, missing `POS/` prefix, too few `/`-separated segments, or a segment that cannot be parsed (coordinates, time, numbers) | `{ "error": "<reason>" }`, e.g. `{"error":"Message must start with 'POS/'"}` |
+| `500` | Unexpected failure (e.g. the S3 write fails) | `{ "error": "Internal server error" }` |
+
+Ingest runs the full parser before it writes anything. A malformed message is rejected with 400 up front and never enters the pipeline.
+
+### `GET /status/{flightId}`
+
+```bash
+curl -i "$API_URL/status/UL20420261004RGNBKK"
+```
+
+**200 OK: calculation complete**
+
+```json
+{
+  "FlightId": "UL20420261004RGNBKK",
+  "Status": "COMPLETE",
+  "Timestamp": "<calculation time, UTC>",
+  "RemainingFlightTimeMinutes": 43,
+  "EstimatedFuelAtArrivalKg": 10512,
+  "LowFuelWarning": false
+}
+```
+
+| Status | When | Body |
+|---|---|---|
+| `200` `COMPLETE` | A `CalculationResults` row exists | The latest calculation, loaded from the `results/` object it points to |
+| `200` `PROCESSING` | Parsed but not yet calculated | `FlightId`, `Status: "PROCESSING"`, `Timestamp` (POS message time). The calculation fields are `null` |
+| `404` | Nothing recorded for this `flightId` yet | `{ "error": "No records found for flight <flightId>" }` |
+| `500` | Unexpected failure | `{ "error": "Internal server error" }` |
+
+The pipeline is asynchronous, so a `GET` sent right after a `POST` can return `404` (not parsed yet) or `PROCESSING`. This lag is intentional. On a warm stack the status reaches `COMPLETE` within seconds.
+
+### Example session
+
+```bash
+# Normal flight
+curl -s -X POST "$API_URL/pos-reports" -H "Content-Type: text/plain" \
+  --data 'POS/UL204.FR RGN/TO BKK/041205/N1642.3E09612.5/450/12500/2800'
+sleep 5
+curl -s "$API_URL/status/UL20420261004RGNBKK"
+# -> "Status":"COMPLETE", "RemainingFlightTimeMinutes":43, "EstimatedFuelAtArrivalKg":10512, "LowFuelWarning":false
+
+# Low fuel (1500 kg on board): estimated fuel at arrival is negative
+curl -s -X POST "$API_URL/pos-reports" -H "Content-Type: text/plain" \
+  --data 'POS/UL205.FR RGN/TO BKK/041205/N1642.3E09612.5/450/1500/2800'
+sleep 5
+curl -s "$API_URL/status/UL20520261004RGNBKK"
+# -> "LowFuelWarning":true
+
+# Invalid body -> 400
+curl -i -X POST "$API_URL/pos-reports" -H "Content-Type: text/plain" --data 'hola'
+
+# Unknown flight -> 404
+curl -i "$API_URL/status/NOPE123"
+```
+
+> The date part of a `flightId` depends on the month you send the report in. Use the `FlightId` from the `POST` response instead of hard-coding one.
+
+---
+
+## Data model
+
+### S3 key layout (single bucket)
+
+| Prefix | Written by | Key format | Content |
+|---|---|---|---|
+| `pos/` | Ingest | `pos/{flightId}-{requestUtc:yyyy-MM-ddTHH-mm-ss}` | Raw POS text (`text/plain`) |
+| `attachment/` | Parser | `attachment/{flightId}-{posTimestamp:yyyy-MM-ddTHH-mm-ss}.json` | Parsed `PosReport`: `FlightId`, `IataCode`, `FlightNumber`, `Departure`, `Destination`, `Timestamp`, `Latitude`, `Longitude`, `GroundSpeedKnots`, `FuelOnBoardKg`, `FuelFlowKgPerHour`, `RawMessage` |
+| `results/` | Calculator | `results/{flightId}-{calcUtc:yyyy-MM-ddTHH-mm-ss}.json` | `CalculationResult`: `FlightId`, `Timestamp`, `DistanceNauticalMiles`, `RemainingFlightTimeMinutes`, `EstimatedFuelAtArrivalKg`, `LowFuelWarning` |
+
+Only `pos/` triggers the Parser. Writes to `attachment/` and `results/` cannot cause recursive invocations.
+
+### DynamoDB tables
+
+| Table | Partition key | Sort key | Other attributes |
+|---|---|---|---|
+| `ParsedRecords` | `flightId` (S) | `timestamp` (S, ISO-8601 POS message time) | `attachment` (S3 key), `departure`, `destination` |
+| `CalculationResults` | `flightId` (S) | `timestamp` (S, ISO-8601 calculation time) | `attachment` (S3 key of the `results/` object) |
+
+Status gets the newest row with `Query(flightId, ScanIndexForward=false, Limit=1)`. ISO-8601 strings sort in time order. The tables store pointers to S3 objects, not the payloads.
+
+### SQS message (Parser → Calculator)
+
+```json
+{ "flightId": "UL20420261004RGNBKK", "attachmentKey": "attachment/UL20420261004RGNBKK-2026-10-04T12-05-00.json", "timestamp": "2026-10-04T12:05:00.0000000Z" }
+```
+
+### Environment variables
+
+| Lambda | Variables |
+|---|---|
+| Ingest | `BUCKET_NAME` |
+| Parser | `BUCKET_NAME`, `PARSED_RECORDS_TABLE`, `PROCESS_QUEUE_URL` |
+| Calculator | `BUCKET_NAME`, `PARSED_RECORDS_TABLE`, `CALCULATION_RESULTS_TABLE` |
+| Status | `BUCKET_NAME`, `PARSED_RECORDS_TABLE`, `CALCULATION_RESULTS_TABLE` |
+
+CDK sets every variable. Each handler checks for its variables in its constructor and throws if one is missing (fail-fast).
+
+---
+
+## Project structure
+
+```
+.
+├── README.md
+├── ARCHITECTURE.md                     # Design notes
+├── cdk/                                # AWS CDK app (TypeScript)
+│   ├── bin/app.ts                      # App entry: PosPipelineStack
+│   ├── lib/pos-pipeline-stack.ts       # All resources, IAM grants, routes, outputs
+│   ├── cdk.json
+│   ├── package.json
+│   ├── package-lock.json
+│   └── tsconfig.json
+├── scripts/
+│   ├── sample-pos.txt                  # Gold example message
+│   ├── example-commands.sh             # curl walkthrough
+│   └── README.md
+└── src/
+    ├── PosPipeline.sln
+    ├── PosPipeline.Shared/             # Logic shared by all Lambdas
+    │   ├── Models/                     # PosReport, CalculationResult, IngestResponse, StatusResponse, Airport
+    │   └── Services/                   # PosParser, FlightIdBuilder, HaversineCalculator, AirportLookup
+    ├── PosPipeline.Ingest/Function.cs      # POST /pos-reports
+    ├── PosPipeline.Parser/Function.cs      # S3 pos/ → attachment/ + ParsedRecords + SQS
+    ├── PosPipeline.Calculator/Function.cs  # SQS → results/ + CalculationResults
+    ├── PosPipeline.Status/Function.cs      # GET /status/{flightId}
+    └── PosPipeline.Tests/                  # xUnit tests
+```
+
+---
+
+## Prerequisites
+
+| Tool | Version | Used for |
+|---|---|---|
+| .NET SDK | 8.0 | Building and testing the handlers |
+| Node.js | 18+ | CDK app |
+| Docker | Recent, must be running | Lambda bundling (`public.ecr.aws/sam/build-dotnet8` image) and Floci |
+| AWS CLI | v2 | Credentials and inspecting resources |
+| AWS CDK | v2 (installed locally by `npm install`, run with `npx cdk`) | Synth, deploy and destroy |
+
+---
+
+## Run the unit tests
+
+```bash
+cd src
+dotnet test
+```
+
+The suite has **27 xUnit tests**, all passing. None of them need AWS:
+
+| Area | Tests | What is covered |
+|---|---|---|
+| `PosParser` | 10 | Gold example latitude (16.705) and longitude (96.2083), every parsed field, negative `S`/`W` hemispheres, invalid and truncated messages, too-few segments, bad time field, bad coordinates |
+| `FlightIdBuilder` | 3 | Gold format (`UL20420260904RGNBKK` with a fixed clock), year/month taken from the request, 3-letter airline codes |
+| `HaversineCalculator` | 8 | Gold distance (≈319 NM), zero distance, a known long-haul distance, gold flight time (43 min), zero ground speed rejected, fuel consumption, gold fuel at arrival, negative fuel → warning |
+| `AirportLookup` | 6 | Known and unknown codes, case-insensitive lookup, empty code, `HasAirport` |
+
+---
+
+## Run locally on Floci
+
+[Floci](https://github.com/floci-io/floci) is a free emulator that works with LocalStack tooling. It serves AWS APIs on port `4566` and runs Lambda functions in Docker containers. The same CDK app deploys to it unchanged, apart from one context flag.
+
+**1. Start Floci.** The Docker socket is mounted so Floci can start Lambda containers.
+
+```bash
+docker run -d --name floci -p 4566:4566 \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  floci/floci:latest
+```
+
+**2. Install CDK dependencies and the `cdklocal` wrapper.**
+
+```bash
+cd cdk
+npm install
+npm install --no-save aws-cdk-local
+```
+
+**3. Use dummy credentials and bootstrap the emulated account.**
+
+```bash
+export AWS_ACCESS_KEY_ID=test
+export AWS_SECRET_ACCESS_KEY=test
+export AWS_DEFAULT_REGION=us-east-1
+
+npx cdklocal bootstrap aws://000000000000/us-east-1
+```
+
+**4. Deploy with `local=true`.**
+
+```bash
+npx cdklocal deploy -c local=true --require-approval never --outputs-file /tmp/pos-outputs.json
+```
+
+`-c local=true` sets `autoDeleteObjects: false` on the reports bucket. On AWS, `autoDeleteObjects: true` adds a CDK-managed custom resource that empties the bucket before deletion, and that custom resource does not deploy reliably on the emulator. Nothing else changes between local and cloud deployments.
+
+**5. Find the API endpoint.** On Floci an HTTP API is served at:
+
+```
+http://localhost:4566/restapis/<api-id>/$default/_user_request_
+```
+
+The `<api-id>` is in the `ApiUrl` output in `/tmp/pos-outputs.json`. You can also query it:
+
+```bash
+API_ID=$(aws --endpoint-url http://localhost:4566 apigatewayv2 get-apis \
+  --query "Items[?Name=='pos-reports-api'].ApiId" --output text)
+API_URL="http://localhost:4566/restapis/${API_ID}/\$default/_user_request_"
+```
+
+**6. Smoke test.** Run the commands in [Example session](#example-session). Expected results:
+
+| Request | Result |
+|---|---|
+| `POST` gold example | `202` `{"FlightId":"UL20420261004RGNBKK","Status":"RECEIVED",...}` |
+| `GET /status/UL20420261004RGNBKK` | `200` `COMPLETE`, `RemainingFlightTimeMinutes: 43`, `EstimatedFuelAtArrivalKg: 10512`, `LowFuelWarning: false` |
+| `POST` with 1500 kg fuel on board (`UL205`) | Status shows `LowFuelWarning: true` |
+| `POST` body `hola` | `400` |
+| `GET /status/NOPE123` | `404` `{"error":"No records found for flight NOPE123"}` |
+
+**7. Inspect resources (optional).** Floci's web console shows S3, DynamoDB, SQS, Lambda and API Gateway resources. You can also use the AWS CLI:
+
+```bash
+BUCKET=$(jq -r '.PosPipelineStack.BucketName' /tmp/pos-outputs.json)
+aws --endpoint-url http://localhost:4566 s3 ls "s3://$BUCKET" --recursive
+aws --endpoint-url http://localhost:4566 dynamodb scan --table-name ParsedRecords
+aws --endpoint-url http://localhost:4566 dynamodb scan --table-name CalculationResults
+```
+
+**Clean up:** `docker rm -f floci`
+
+---
+
+## Deploy to AWS
+
+Docker must be running because each Lambda is compiled inside the `public.ecr.aws/sam/build-dotnet8` image. The bundling step runs `dotnet restore`, then `dotnet build`, then `dotnet publish -c Release --runtime linux-x64 --self-contained false`.
+
+```bash
+cd cdk
+npm install
+
+# 1. One-time per account/region
+npx cdk bootstrap aws://<ACCOUNT_ID>/<REGION>
+
+# 2. Review the changes (optional)
+npx cdk diff
+
+# 3. Deploy and save the outputs
+npx cdk deploy --outputs-file outputs.json
+```
+
+The stack has been deployed to `ap-southeast-7` (Asia Pacific, Thailand). It is region-agnostic: `bin/app.ts` resolves the account and region from `CDK_DEFAULT_ACCOUNT` / `CDK_DEFAULT_REGION`, which come from your AWS CLI profile.
+
+**Smoke test**
+
+```bash
+API_URL=$(jq -r '.PosPipelineStack.ApiUrl' outputs.json)   # https://<api-id>.execute-api.<REGION>.amazonaws.com
+```
+
+Then run the commands in [Example session](#example-session).
+
+**Logs.** Each function logs to `/aws/lambda/<function-name>`:
+
+```bash
+aws logs tail /aws/lambda/pos-pipeline-calculator --follow
+```
+
+**Tear down**
+
+```bash
+npx cdk destroy
+```
+
+The bucket and both tables use `RemovalPolicy.DESTROY`, and the bucket also has `autoDeleteObjects`. As a result, `destroy` removes every resource, data included.
+
+---
+
+## Design decisions and trade-offs
+
+**Asynchronous, decoupled pipeline (S3 event → Lambda → SQS → Lambda).** Ingest only validates and writes one S3 object, so API latency stays low and does not depend on downstream work. The raw message is stored before any processing, so it can always be replayed. SQS between Parser and Calculator adds buffering, retries and back-pressure. The cost is eventual consistency, which the `PROCESSING` state on the status endpoint makes visible.
+
+**Dead-letter queue and partial batch failures.** The processing queue sends a message to a DLQ with 14-day retention after 3 failed receives (`maxReceiveCount: 3`). Calculator returns `SQSBatchResponse` with `reportBatchItemFailures` enabled, so one bad message does not force the whole batch to retry. The visibility timeout (180 s) is three times the Calculator timeout (60 s), so a message in flight cannot be delivered twice by mistake.
+
+**Fail-loud Parser.** Parser processes S3 records one at a time. It writes the attachment, then DynamoDB, then SQS, and rethrows on any error so the asynchronous invocation is retried. A message is queued for calculation only after its parsed data has been stored. Keys are deterministic, so a retry overwrites the same objects and rows.
+
+**Calculator loads DynamoDB then S3.** Calculator queries `ParsedRecords` to confirm the parsed record exists as the authoritative source, then loads the full POS payload from the S3 attachment. This ensures the calculation uses only confirmed parsed data while still benefiting from the complete JSON structure in S3.
+
+**Two DynamoDB tables, S3 for payloads.** `ParsedRecords` and `CalculationResults` follow the brief and keep the parse and calculation lifecycles apart. Both use `flightId` + ISO-8601 `timestamp`, so "latest for a flight" is one `Query` with `Limit 1`. The rows store S3 pointers (`attachment`) rather than full payloads, so DynamoDB items stay small and S3 holds the source of truth.
+
+**Status built from DynamoDB and S3.** Status checks `CalculationResults` first. If a row exists, it loads the `results/` object and returns `COMPLETE`. If not, it falls back to `ParsedRecords` and returns `PROCESSING`, and if neither has a row it returns 404. This avoids copying calculation fields into DynamoDB.
+
+**Least-privilege IAM with explicit grants.** Each function has its own role and only the exact actions it needs, with no wildcard actions on application resources:
+
+| Function | S3 (scoped by prefix) | DynamoDB | SQS |
+|---|---|---|---|
+| Ingest | `PutObject` on `pos/*` | none | none |
+| Parser | `GetObject` on `pos/*`, `PutObject` on `attachment/*` | `PutItem` on `ParsedRecords` | `SendMessage` to processing queue |
+| Calculator | `GetObject` on `attachment/*`, `PutObject` on `results/*` | `Query` on `ParsedRecords`, `PutItem` on `CalculationResults` | `ReceiveMessage`, `DeleteMessage`, `GetQueueAttributes` on processing queue (event source) |
+| Status | `GetObject` on `results/*` | `Query` on `ParsedRecords` and `CalculationResults` | none |
+
+All IAM policies use explicit `addToRolePolicy` statements with exact actions and resource ARNs scoped to specific bucket prefixes and table names. CloudWatch Logs permissions are scoped to each function's log group. The S3 notification is filtered to the `pos/` prefix only.
+
+**One shared library, four functions.** Parsing, the `flightId` rule, haversine and the airport lookup live in `PosPipeline.Shared`. Every Lambda and the test suite use that one implementation, so they cannot drift apart. Each step is still a separate function with its own role, timeout and scaling.
+
+**Fast cold starts.** Functions are published with `PublishReadyToRun` (IL precompiled to native code, so less JIT work at startup) and target `linux-x64`, matching the x86_64 Lambda runtime. That is why `--runtime linux-x64 --self-contained false` is set in the bundling command. Each function gets 512 MB, which also scales its CPU share.
+
+**Fail-fast configuration.** A missing environment variable makes the function fail at initialisation with a clear message, instead of failing later on the first S3 or DynamoDB call.
+
+**Static airport lookup.** Destination coordinates for RGN, BKK and SIN (the airports in the brief) are hard-coded in `AirportLookup`, plus JFK and LAX used by tests. An unknown destination fails the calculation, the message is retried and then goes to the DLQ, and the error is logged with the list of known codes. In production this would be a reference table (DynamoDB or a managed airport data source).
+
+**HTTP API instead of REST API.** HTTP API is cheaper, has lower latency and supports Lambda proxy integrations natively. This service does not need REST-only features such as usage plans or request validators.
+
+**Meaningful logging.** Each function logs one line per step at key points: the S3 key stored, the flight parsed, the DynamoDB write, the SQS send, and a single summary line per calculation (`Distance`, `Time`, `Fuel`, `Warning`). Errors are logged with the full exception and the S3 key or SQS message ID.
+
+**Removal policies for development.** `RemovalPolicy.DESTROY`, `autoDeleteObjects` (cloud only) and PITR off keep test deployments cheap and easy to tear down. These are deliberate dev settings. See hardening below.
+
+---
+
+## Security and production hardening
+
+The current stack is ready for evaluation. The gaps below are known and listed on purpose:
+
+- **Authentication:** the API currently has **no authorizer**. Anyone with the URL can call it. Options:
+  - a **JWT authorizer** (Amazon Cognito or any OIDC provider) for client applications;
+  - **IAM (SigV4) authorization** for service-to-service callers.
+- **Throttling and CORS:** set stage-level rate and burst limits on the HTTP API, and replace the `*` CORS origin with known origins.
+- **Data protection:**
+  - switch to `RemovalPolicy.RETAIN` and remove `autoDeleteObjects`;
+  - enable DynamoDB point-in-time recovery and S3 versioning;
+  - add `enforceSSL` on the bucket;
+  - consider customer-managed KMS keys.
+- **Tighter IAM:**
+  - replace the CDK grant helpers with explicit policy statements listing the exact actions (e.g. only `s3:GetObject`/`s3:PutObject`, `dynamodb:Query`/`PutItem`);
+  - remove grants the code does not currently use (Calculator's `ParsedRecords` read, Status's `attachment/*` read).
+- **Failure visibility:**
+  - CloudWatch alarm on DLQ depth (`ApproximateNumberOfMessagesVisible > 0`), plus Lambda error and throttle alarms;
+  - an on-failure destination or DLQ for the Parser's asynchronous invocation;
+  - a redrive runbook.
+- **Observability:**
+  - structured JSON logs carrying `flightId` as a correlation field;
+  - AWS X-Ray tracing across API Gateway, Lambda and SQS;
+  - explicit log retention periods.
+- **Input hardening:**
+  - stricter field validation (airport code format, numeric ranges, day valid for the month);
+  - handler-level tests for the HTTP responses.
+
+---
+
+## Assumptions
+
+- **Date rule:** the `flightId` date and the POS timestamp use the UTC **year and month when the report was received**, plus the **day from the message**, as the brief specifies. A message day that does not exist in the current month (e.g. `31` in a 30-day month) is rejected with 400. Reports that cross a month boundary (sent on the 1st about the 30th) are dated in the month received.
+- **Rounding:** remaining flight time is rounded to the nearest whole minute and fuel at arrival to the nearest kilogram, matching the brief's worked example (43 min). The low-fuel warning is set when the rounded fuel at arrival is below zero.
+- **Distance:** great-circle (haversine) distance from the reported position straight to the destination airport, with `EarthRadiusNauticalMiles = 3440.065`. Routing, winds and reserves are out of scope.
+- **Latest wins:** Status returns the most recent calculation for a `flightId`, ordered by calculation time.
+- **Request body:** the POS message is the raw request body (`text/plain`), one message per request.
+- **Times:** all timestamps are UTC.
+
+---
+
+*Author: Victor Gonzalez*

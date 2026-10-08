@@ -14,7 +14,7 @@ RESPONSE=$(curl -X POST "$API_URL/pos-reports" \
 echo "$RESPONSE"
 
 # Extract flightId from response (assumes jq is installed)
-FLIGHT_ID=$(echo "$RESPONSE" | grep -o '"flightId":"[^"]*"' | cut -d'"' -f4)
+FLIGHT_ID=$(echo "$RESPONSE" | grep -o '"FlightId":"[^"]*"' | cut -d'"' -f4)
 echo "Flight ID: $FLIGHT_ID"
 
 # 2. Query status immediately (should be RECEIVED or PROCESSING)
