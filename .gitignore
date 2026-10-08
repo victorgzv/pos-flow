@@ -20,3 +20,7 @@ uploads/
 .vscode/
 *.user
 *.suo
+
+# Local artifacts
+AWSCLIV2.pkg
+cdk/outputs.json
