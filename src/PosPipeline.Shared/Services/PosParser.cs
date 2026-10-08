@@ -25,8 +25,8 @@ public class PosParser
             throw new ArgumentException("POS message must start with 'POS/'", nameof(rawMessage));
 
         var parts = rawMessage.Split('/');
-        if (parts.Length < 7)
-            throw new ArgumentException($"POS message does not have enough parts (expected at least 7, got {parts.Length})", nameof(rawMessage));
+        if (parts.Length < 8)
+            throw new ArgumentException($"POS message does not have enough parts (expected at least 8, got {parts.Length})", nameof(rawMessage));
 
         try
         {
@@ -64,8 +64,8 @@ public class PosParser
 
             // Part 3: "{ddHHmm}" - day, hour, minute
             var timeString = parts[3];
-            if (timeString.Length < 5)
-                throw new ArgumentException("Invalid time format");
+            if (timeString.Length != 6)
+                throw new ArgumentException($"Invalid time format - expected 6 characters (ddHHmm), got {timeString.Length}");
 
             int day = int.Parse(timeString.Substring(0, 2));
             int hour = int.Parse(timeString.Substring(2, 2));

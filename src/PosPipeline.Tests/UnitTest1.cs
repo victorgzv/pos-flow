@@ -123,9 +123,53 @@ public class PosParserTests
         var parser = new PosParser();
         var requestTimestamp = DateTime.UtcNow;
 
-        // Act & Assert - not enough parts
+        // Act & Assert - not enough parts (only 7 parts, need 8)
         Assert.Throws<ArgumentException>(() => 
             parser.Parse("POS/UL204.FR RGN/TO BKK/041205", requestTimestamp));
+    }
+
+    [Fact]
+    public void Parse_TooFewSegments_ThrowsArgumentException()
+    {
+        // Arrange
+        var parser = new PosParser();
+        var requestTimestamp = DateTime.UtcNow;
+
+        // Act & Assert - 7 segments instead of 8
+        var message = "POS/UL204.FR RGN/TO BKK/041205/N1642.3E09612.5/450/12500";
+        Assert.Throws<ArgumentException>(() => parser.Parse(message, requestTimestamp));
+    }
+
+    [Fact]
+    public void Parse_BadTimeField_ThrowsArgumentException()
+    {
+        // Arrange
+        var parser = new PosParser();
+        var requestTimestamp = DateTime.UtcNow;
+
+        // Act & Assert - time field too short (5 chars instead of 6)
+        var message = "POS/UL204.FR RGN/TO BKK/04120/N1642.3E09612.5/450/12500/2800";
+        Assert.Throws<ArgumentException>(() => parser.Parse(message, requestTimestamp));
+
+        // Act & Assert - time field too long
+        var message2 = "POS/UL204.FR RGN/TO BKK/0412055/N1642.3E09612.5/450/12500/2800";
+        Assert.Throws<ArgumentException>(() => parser.Parse(message2, requestTimestamp));
+    }
+
+    [Fact]
+    public void Parse_BadCoordinates_ThrowsArgumentException()
+    {
+        // Arrange
+        var parser = new PosParser();
+        var requestTimestamp = DateTime.UtcNow;
+
+        // Act & Assert - missing longitude hemisphere
+        var message = "POS/UL204.FR RGN/TO BKK/041205/N1642.3096125/450/12500/2800";
+        Assert.Throws<ArgumentException>(() => parser.Parse(message, requestTimestamp));
+
+        // Act & Assert - invalid latitude hemisphere
+        var message2 = "POS/UL204.FR RGN/TO BKK/041205/X1642.3E09612.5/450/12500/2800";
+        Assert.Throws<ArgumentException>(() => parser.Parse(message2, requestTimestamp));
     }
 }
 

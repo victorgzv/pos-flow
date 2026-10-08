@@ -51,7 +51,7 @@ public class Function
             }
 
             var parts = rawMessage.Split('/');
-            if (parts.Length < 7)
+            if (parts.Length < 8)
             {
                 return CreateResponse(400, new { error = "Invalid POS message format - insufficient parts" });
             }
