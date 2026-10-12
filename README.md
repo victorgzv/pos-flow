@@ -137,7 +137,7 @@ POS/UL204.FR RGN/TO BKK/041205/N1642.3E09612.5/450/12500/2800
 
 Parser uses the `flightId` and ingest timestamp stored in S3 object metadata (written by Ingest), so the date matches the original POST time rather than when the S3 event is delivered. That keeps the id stable near a month boundary.
 
-The raw object key is `pos/{flightId}-{requestUtc}`. For a request at `2026-10-04T15:12:30.123Z` that is `pos/UL20420261004RGNBKK-2026-10-04T15-12-30-123`.
+The raw object key is `pos/{flightId}-{requestUtc}`. For a request at `2026-10-04T15:12:30.123Z` that is `pos/UL20420261004RGNBKK-2026-10-04T15:12:30.123Z`.
 
 ### Calculation
 
