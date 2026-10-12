@@ -20,7 +20,9 @@ A serverless, event-driven pipeline on AWS that ingests aircraft position (POS) 
 
 ## Architecture
 
-![Architecture Diagram](docs/architecture.svg)
+![Architecture Diagram](docs/architecture.png)
+
+> [View source SVG](docs/architecture.svg)
 
 Architecture diagram (Mermaid source)
 
