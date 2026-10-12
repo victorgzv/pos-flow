@@ -45,7 +45,7 @@ public class Function
 
             context.Logger.LogInformation($"Querying status for flight {flightId}");
 
-            // Query CalculationResults table for latest result
+            // Query both tables to compare timestamps
             var calcQueryResponse = await _dynamoClient.QueryAsync(new QueryRequest
             {
                 TableName = _calculationResultsTable,
@@ -58,8 +58,52 @@ public class Function
                 Limit = 1
             });
 
-            // If calculation result exists, return COMPLETE status
-            if (calcQueryResponse.Items.Count > 0)
+            var parseQueryResponse = await _dynamoClient.QueryAsync(new QueryRequest
+            {
+                TableName = _parsedRecordsTable,
+                KeyConditionExpression = "flightId = :fid",
+                ExpressionAttributeValues = new Dictionary<string, AttributeValue>
+                {
+                    [":fid"] = new AttributeValue { S = flightId }
+                },
+                ScanIndexForward = false,
+                Limit = 1
+            });
+
+            // Determine status based on which record is newest
+            bool hasCalcResult = calcQueryResponse.Items.Count > 0;
+            bool hasParsedRecord = parseQueryResponse.Items.Count > 0;
+
+            if (!hasParsedRecord && !hasCalcResult)
+            {
+                // No records found
+                return CreateResponse(404, new { error = $"No records found for flight {flightId}" });
+            }
+
+            DateTime? latestCalcTimestamp = hasCalcResult 
+                ? DateTime.Parse(calcQueryResponse.Items[0]["timestamp"].S) 
+                : (DateTime?)null;
+            
+            DateTime? latestParsedTimestamp = hasParsedRecord 
+                ? DateTime.Parse(parseQueryResponse.Items[0]["timestamp"].S) 
+                : (DateTime?)null;
+
+            // If we have a parsed record that's newer than the latest calculation, return PROCESSING
+            if (hasParsedRecord && latestParsedTimestamp.HasValue && 
+                (!hasCalcResult || latestParsedTimestamp.Value > latestCalcTimestamp))
+            {
+                var response = new StatusResponse
+                {
+                    FlightId = flightId,
+                    Status = "PROCESSING",
+                    Timestamp = latestParsedTimestamp.Value
+                };
+
+                return CreateResponse(200, response);
+            }
+
+            // Return the completed calculation (we know hasCalcResult is true here)
+            if (hasCalcResult)
             {
                 var calcItem = calcQueryResponse.Items[0];
                 var attachmentKey = calcItem["attachment"].S;
@@ -87,34 +131,6 @@ public class Function
 
                     return CreateResponse(200, response);
                 }
-            }
-
-            // Check if parsed record exists (processing in progress)
-            var parseQueryResponse = await _dynamoClient.QueryAsync(new QueryRequest
-            {
-                TableName = _parsedRecordsTable,
-                KeyConditionExpression = "flightId = :fid",
-                ExpressionAttributeValues = new Dictionary<string, AttributeValue>
-                {
-                    [":fid"] = new AttributeValue { S = flightId }
-                },
-                ScanIndexForward = false,
-                Limit = 1
-            });
-
-            if (parseQueryResponse.Items.Count > 0)
-            {
-                var parseItem = parseQueryResponse.Items[0];
-                var timestamp = DateTime.Parse(parseItem["timestamp"].S);
-
-                var response = new StatusResponse
-                {
-                    FlightId = flightId,
-                    Status = "PROCESSING",
-                    Timestamp = timestamp
-                };
-
-                return CreateResponse(200, response);
             }
 
             // No records found

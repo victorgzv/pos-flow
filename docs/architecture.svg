@@ -1,0 +1,143 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 800">
+  <defs>
+    <style>
+      .box { fill: #e8f4f8; stroke: #0066cc; stroke-width: 2; }
+      .api-box { fill: #fff4e6; stroke: #ff9900; stroke-width: 2; }
+      .lambda-box { fill: #e6f7e6; stroke: #00aa00; stroke-width: 2; }
+      .storage-box { fill: #f0e6ff; stroke: #6600cc; stroke-width: 2; }
+      .queue-box { fill: #ffe6e6; stroke: #cc0000; stroke-width: 2; }
+      .text { font-family: Arial, sans-serif; font-size: 14px; fill: #333; }
+      .title { font-weight: bold; font-size: 16px; }
+      .arrow { stroke: #666; stroke-width: 2; fill: none; marker-end: url(#arrowhead); }
+      .dashed { stroke-dasharray: 5,5; }
+    </style>
+    <marker id="arrowhead" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
+      <polygon points="0 0, 10 3, 0 6" fill="#666" />
+    </marker>
+  </defs>
+
+  <!-- Title -->
+  <text x="600" y="30" class="text title" text-anchor="middle" font-size="20">POS Report Pipeline Architecture</text>
+
+  <!-- Client -->
+  <ellipse cx="100" cy="100" rx="60" ry="40" class="box"/>
+  <text x="100" y="105" class="text" text-anchor="middle">Client</text>
+
+  <!-- API Gateway -->
+  <rect x="250" y="60" width="180" height="80" rx="5" class="api-box"/>
+  <text x="340" y="85" class="text title" text-anchor="middle">API Gateway</text>
+  <text x="340" y="105" class="text" text-anchor="middle">POST /pos-reports</text>
+  <text x="340" y="125" class="text" text-anchor="middle">GET /status/{flightId}</text>
+
+  <!-- Ingest Lambda -->
+  <rect x="480" y="40" width="140" height="50" rx="5" class="lambda-box"/>
+  <text x="550" y="70" class="text title" text-anchor="middle">Ingest »</text>
+
+  <!-- S3 Bucket -->
+  <rect x="700" y="150" width="200" height="150" rx="5" class="storage-box"/>
+  <text x="800" y="175" class="text title" text-anchor="middle">S3 Bucket</text>
+  <text x="800" y="200" class="text" text-anchor="middle">pos/</text>
+  <text x="800" y="220" class="text" text-anchor="middle">attachment/</text>
+  <text x="800" y="240" class="text" text-anchor="middle">results/</text>
+
+  <!-- Parser Lambda -->
+  <rect x="480" y="180" width="140" height="50" rx="5" class="lambda-box"/>
+  <text x="550" y="210" class="text title" text-anchor="middle">Parser »</text>
+
+  <!-- SQS Queue -->
+  <rect x="480" y="340" width="140" height="50" rx="5" class="queue-box"/>
+  <text x="550" y="365" class="text title" text-anchor="middle">Process Queue</text>
+
+  <!-- DLQ -->
+  <rect x="480" y="420" width="140" height="40" rx="5" class="queue-box"/>
+  <text x="550" y="445" class="text" text-anchor="middle">DLQ</text>
+
+  <!-- Calculator Lambda -->
+  <rect x="700" y="340" width="140" height="50" rx="5" class="lambda-box"/>
+  <text x="770" y="370" class="text title" text-anchor="middle">Calculator »</text>
+
+  <!-- DynamoDB Tables -->
+  <rect x="950" y="150" width="180" height="150" rx="5" class="storage-box"/>
+  <text x="1040" y="175" class="text title" text-anchor="middle">DynamoDB</text>
+  <text x="1040" y="210" class="text" text-anchor="middle">ParsedRecords</text>
+  <text x="1040" y="230" class="text" text-anchor="middle">(PK: flightId)</text>
+  <text x="1040" y="260" class="text" text-anchor="middle">CalculationResults</text>
+  <text x="1040" y="280" class="text" text-anchor="middle">(PK: flightId)</text>
+
+  <!-- Status Lambda -->
+  <rect x="950" y="400" width="140" height="50" rx="5" class="lambda-box"/>
+  <text x="1020" y="430" class="text title" text-anchor="middle">Status »</text>
+
+  <!-- Arrows -->
+  <!-- Client to API -->
+  <path d="M 160 100 L 250 100" class="arrow"/>
+  
+  <!-- API to Ingest -->
+  <path d="M 340 60 L 550 90" class="arrow"/>
+  
+  <!-- API to Status -->
+  <path d="M 340 140 L 340 500 L 950 425" class="arrow"/>
+  
+  <!-- Ingest to S3 pos/ -->
+  <path d="M 620 65 L 700 175" class="arrow"/>
+  
+  <!-- S3 pos/ to Parser -->
+  <path d="M 700 200 L 620 205" class="arrow"/>
+  <text x="650" y="195" class="text" font-size="12">S3 event</text>
+  
+  <!-- Parser to S3 attachment/ -->
+  <path d="M 550 230 L 700 220" class="arrow"/>
+  
+  <!-- Parser to DynamoDB ParsedRecords -->
+  <path d="M 620 205 L 950 210" class="arrow"/>
+  
+  <!-- Parser to Queue -->
+  <path d="M 550 230 L 550 340" class="arrow"/>
+  
+  <!-- Queue to Calculator -->
+  <path d="M 620 365 L 700 365" class="arrow"/>
+  
+  <!-- Queue to DLQ -->
+  <path d="M 550 390 L 550 420" class="arrow dashed"/>
+  <text x="560" y="410" class="text" font-size="11">after 3 fails</text>
+  
+  <!-- Calculator to S3 attachment/ (read) -->
+  <path d="M 770 340 L 800 300" class="arrow"/>
+  
+  <!-- Calculator to S3 results/ (write) -->
+  <path d="M 820 340 L 850 300" class="arrow"/>
+  
+  <!-- Calculator to DynamoDB CalculationResults -->
+  <path d="M 840 365 L 950 260" class="arrow"/>
+  
+  <!-- Status to DynamoDB -->
+  <path d="M 1020 400 L 1040 300" class="arrow"/>
+  
+  <!-- Status to S3 results/ -->
+  <path d="M 950 425 L 800 250" class="arrow"/>
+
+  <!-- Flow numbers -->
+  <circle cx="340" cy="40" r="15" fill="#0066cc"/>
+  <text x="340" y="46" class="text" fill="white" text-anchor="middle" font-weight="bold">1</text>
+  
+  <circle cx="680" cy="170" r="15" fill="#0066cc"/>
+  <text x="680" y="176" class="text" fill="white" text-anchor="middle" font-weight="bold">2</text>
+  
+  <circle cx="650" cy="360" r="15" fill="#0066cc"/>
+  <text x="650" y="366" class="text" fill="white" text-anchor="middle" font-weight="bold">3</text>
+  
+  <circle cx="920" cy="430" r="15" fill="#0066cc"/>
+  <text x="920" y="436" class="text" fill="white" text-anchor="middle" font-weight="bold">4</text>
+
+  <!-- Legend -->
+  <text x="50" y="550" class="text title">Request Flow:</text>
+  <text x="50" y="580" class="text" font-size="13">1. POST ’ Ingest validates, writes to S3 pos/, returns 202</text>
+  <text x="50" y="605" class="text" font-size="13">2. S3 event ’ Parser reads, parses, writes attachment/ + DynamoDB + SQS</text>
+  <text x="50" y="630" class="text" font-size="13">3. SQS ’ Calculator reads parsed data, calculates, writes results/ + DynamoDB</text>
+  <text x="50" y="655" class="text" font-size="13">4. GET /status ’ Status queries DynamoDB + reads S3 results</text>
+
+  <!-- Component labels -->
+  <text x="50" y="720" class="text" font-size="12" font-weight="bold">Components:</text>
+  <text x="50" y="740" class="text" font-size="11">" Serverless (AWS Lambda .NET 8) " Event-driven (S3 + SQS) " Async processing</text>
+  <text x="50" y="760" class="text" font-size="11">" DLQ for failed messages " Point-in-time state via DynamoDB + S3</text>
+</svg>

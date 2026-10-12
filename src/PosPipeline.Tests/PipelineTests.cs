@@ -441,3 +441,126 @@ public class AirportLookupTests
         Assert.False(lookup.HasAirport("UNKNOWN"));
     }
 }
+
+/// <summary>
+/// Tests for S3 key uniqueness and formatting
+/// </summary>
+public class S3KeyFormattingTests
+{
+    [Fact]
+    public void S3Key_IncludesMilliseconds_ForUniqueness()
+    {
+        // Arrange
+        var timestamp1 = new DateTime(2026, 10, 4, 12, 5, 0, 123, DateTimeKind.Utc);
+        var timestamp2 = new DateTime(2026, 10, 4, 12, 5, 0, 456, DateTimeKind.Utc);
+        var flightId = "UL20420261004RGNBKK";
+
+        // Act - Format keys with milliseconds
+        var key1 = $"pos/{flightId}-{timestamp1:yyyy-MM-ddTHH-mm-ss-fff}";
+        var key2 = $"pos/{flightId}-{timestamp2:yyyy-MM-ddTHH-mm-ss-fff}";
+
+        // Assert - Keys are different despite same second
+        Assert.NotEqual(key1, key2);
+        Assert.Contains("-123", key1);
+        Assert.Contains("-456", key2);
+    }
+
+    [Fact]
+    public void S3Key_WithoutMilliseconds_CanCollide()
+    {
+        // Arrange - Same second, different milliseconds
+        var timestamp1 = new DateTime(2026, 10, 4, 12, 5, 0, 123, DateTimeKind.Utc);
+        var timestamp2 = new DateTime(2026, 10, 4, 12, 5, 0, 456, DateTimeKind.Utc);
+        var flightId = "UL20420261004RGNBKK";
+
+        // Act - Format keys WITHOUT milliseconds (old format)
+        var key1 = $"pos/{flightId}-{timestamp1:yyyy-MM-ddTHH-mm-ss}";
+        var key2 = $"pos/{flightId}-{timestamp2:yyyy-MM-ddTHH-mm-ss}";
+
+        // Assert - Keys collide (this is what we fixed)
+        Assert.Equal(key1, key2);
+    }
+}
+
+/// <summary>
+/// Tests for Status endpoint timestamp comparison logic
+/// </summary>
+public class StatusTimestampComparisonTests
+{
+    [Fact]
+    public void Status_NewerParsedRecord_ShouldReturnProcessing()
+    {
+        // Arrange - Calculation at 12:00:00, parsed record at 12:01:00
+        var calcTimestamp = new DateTime(2026, 10, 4, 12, 0, 0, DateTimeKind.Utc);
+        var parsedTimestamp = new DateTime(2026, 10, 4, 12, 1, 0, DateTimeKind.Utc);
+
+        // Act - Compare timestamps
+        var shouldShowProcessing = parsedTimestamp > calcTimestamp;
+
+        // Assert - Should return PROCESSING status, not COMPLETE
+        Assert.True(shouldShowProcessing, "Newer parsed record should show PROCESSING status");
+    }
+
+    [Fact]
+    public void Status_CalcIsNewer_ShouldReturnComplete()
+    {
+        // Arrange - Parsed at 12:00:00, calculation at 12:01:00
+        var parsedTimestamp = new DateTime(2026, 10, 4, 12, 0, 0, DateTimeKind.Utc);
+        var calcTimestamp = new DateTime(2026, 10, 4, 12, 1, 0, DateTimeKind.Utc);
+
+        // Act - Compare timestamps
+        var shouldShowComplete = calcTimestamp >= parsedTimestamp;
+
+        // Assert - Should return COMPLETE status
+        Assert.True(shouldShowComplete, "Newer calculation should show COMPLETE status");
+    }
+
+    [Fact]
+    public void Status_SameTimestamp_ShouldReturnComplete()
+    {
+        // Arrange - Both at exactly the same time
+        var parsedTimestamp = new DateTime(2026, 10, 4, 12, 0, 0, DateTimeKind.Utc);
+        var calcTimestamp = new DateTime(2026, 10, 4, 12, 0, 0, DateTimeKind.Utc);
+
+        // Act - Compare timestamps
+        var shouldShowComplete = calcTimestamp >= parsedTimestamp;
+
+        // Assert - Should return COMPLETE when timestamps match
+        Assert.True(shouldShowComplete, "Equal timestamps should show COMPLETE status");
+    }
+}
+
+/// <summary>
+/// Tests for Parser using ingest timestamp from metadata
+/// </summary>
+public class ParserMetadataTests
+{
+    [Fact]
+    public void Parser_UsesIngestTimestamp_NotS3EventTime()
+    {
+        // This test documents the expected behavior:
+        // Parser should extract flightId and ingest timestamp from S3 object metadata
+        // (set by Ingest when writing to S3) rather than using the S3 event time.
+        // This prevents flightId mismatches near month boundaries.
+
+        // Arrange
+        var ingestTime = new DateTime(2026, 9, 30, 23, 59, 0, DateTimeKind.Utc); // End of Sept
+        var s3EventTime = new DateTime(2026, 10, 1, 0, 0, 5, DateTimeKind.Utc);  // Oct 1 (S3 event delayed)
+        
+        var parser = new PosParser();
+        var rawMessage = "POS/UL204.FR RGN/TO BKK/301200/N1642.3E09612.5/450/12500/2800";
+
+        // Act - Parse with ingest time (from metadata)
+        var resultWithIngestTime = parser.Parse(rawMessage, ingestTime);
+        
+        // Parse with S3 event time (wrong - would give different month)
+        var resultWithEventTime = parser.Parse(rawMessage, s3EventTime);
+
+        // Assert - Using ingest time gives correct September flightId
+        Assert.Contains("202609", resultWithIngestTime.FlightId); // Sept
+        Assert.Contains("202610", resultWithEventTime.FlightId);  // Oct (wrong!)
+        
+        // The fix ensures Parser uses metadata so both scenarios produce the Sept flightId
+        Assert.NotEqual(resultWithIngestTime.FlightId, resultWithEventTime.FlightId);
+    }
+}

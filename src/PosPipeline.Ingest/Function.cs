@@ -59,14 +59,18 @@ public class Function
             // Parse message to extract flightId and validate structure
             var posReport = _posParser.Parse(rawMessage, requestTimestamp);
 
-            // Store raw message in S3 pos/ prefix
-            var s3Key = $"pos/{posReport.FlightId}-{requestTimestamp:yyyy-MM-ddTHH-mm-ss}";
+            // Store raw message in S3 pos/ prefix with milliseconds for uniqueness
+            var s3Key = $"pos/{posReport.FlightId}-{requestTimestamp:yyyy-MM-ddTHH-mm-ss-fff}";
             await _s3Client.PutObjectAsync(new PutObjectRequest
             {
                 BucketName = _bucketName,
                 Key = s3Key,
                 ContentBody = rawMessage,
-                ContentType = "text/plain"
+                ContentType = "text/plain",
+                Metadata = {
+                    ["flightid"] = posReport.FlightId,
+                    ["ingest-timestamp"] = requestTimestamp.ToString("o")
+                }
             });
 
             context.Logger.LogInformation($"Stored POS report at s3://{_bucketName}/{s3Key}");

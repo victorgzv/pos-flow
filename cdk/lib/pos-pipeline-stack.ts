@@ -42,7 +42,7 @@ export class PosPipelineStack extends cdk.Stack {
       sortKey: { name: 'timestamp', type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       removalPolicy: cdk.RemovalPolicy.DESTROY, // For dev/test
-      pointInTimeRecovery: false, // Enable in prod
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: false }, // Enable in prod
     });
 
     const calculationResultsTable = new dynamodb.Table(this, 'CalculationResults', {
@@ -51,7 +51,7 @@ export class PosPipelineStack extends cdk.Stack {
       sortKey: { name: 'timestamp', type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       removalPolicy: cdk.RemovalPolicy.DESTROY, // For dev/test
-      pointInTimeRecovery: false,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: false }, // Enable in prod
     });
 
     // ==================== SQS Queues ====================

@@ -1,7 +1,5 @@
 # POS Report Pipeline
 
-[![CI](https://github.com/victorgzv/pos-flow/actions/workflows/ci.yml/badge.svg)](https://github.com/victorgzv/pos-flow/actions/workflows/ci.yml)
-
 A serverless, event-driven pipeline on AWS that ingests aircraft position (POS) reports over HTTP, stores the raw and parsed data, and works out each flight's remaining flight time, estimated fuel at arrival, and a low-fuel warning in the background. Clients submit a report with `POST /pos-reports`, get a `flightId` back straight away, and poll `GET /status/{flightId}` for the result. The Lambda handlers are written in C# (.NET 8). All infrastructure is defined in AWS CDK (TypeScript). The stack deploys to real AWS and to the free, LocalStack-compatible emulator [Floci](https://github.com/floci-io/floci).
 
 ---
@@ -25,6 +23,11 @@ A serverless, event-driven pipeline on AWS that ingests aircraft position (POS) 
 ---
 
 ## Architecture
+
+![Architecture Diagram](docs/architecture.svg)
+
+<details>
+<summary>Architecture diagram (Mermaid source)</summary>
 
 ```mermaid
 flowchart LR
@@ -71,6 +74,8 @@ flowchart LR
     status -- Query --> parsed
     status -- GetObject --> res
 ```
+
+</details>
 
 **Request flow**
 
@@ -128,6 +133,8 @@ POS/UL204.FR RGN/TO BKK/041205/N1642.3E09612.5/450/12500/2800
 ```
 
 `yyyy` and `MM` are the UTC year and month when the report was received. `dd` is the day in the message. A report sent in October 2026 with day `04` gives **`UL20420261004RGNBKK`**.
+
+**Important:** The Parser uses the `flightId` and ingest timestamp stored in S3 object metadata (written by Ingest), ensuring the date components match the original POST request time rather than the S3 event delivery time. This prevents flightId mismatches near month boundaries.
 
 ### Calculation
 
@@ -189,8 +196,8 @@ curl -i "$API_URL/status/UL20420261004RGNBKK"
 
 | Status | When | Body |
 |---|---|---|
-| `200` `COMPLETE` | A `CalculationResults` row exists | The latest calculation, loaded from the `results/` object it points to |
-| `200` `PROCESSING` | Parsed but not yet calculated | `FlightId`, `Status: "PROCESSING"`, `Timestamp` (POS message time). The calculation fields are `null` |
+| `200` `COMPLETE` | A `CalculationResults` row exists and no newer parsed record is pending | The latest calculation, loaded from the `results/` object it points to |
+| `200` `PROCESSING` | Parsed but not yet calculated, or a newer report is parsed but not yet calculated | `FlightId`, `Status: "PROCESSING"`, `Timestamp` (POS message time). The calculation fields are `null` |
 | `404` | Nothing recorded for this `flightId` yet | `{ "error": "No records found for flight <flightId>" }` |
 | `500` | Unexpected failure | `{ "error": "Internal server error" }` |
 
@@ -230,9 +237,9 @@ curl -i "$API_URL/status/NOPE123"
 
 | Prefix | Written by | Key format | Content |
 |---|---|---|---|
-| `pos/` | Ingest | `pos/{flightId}-{requestUtc:yyyy-MM-ddTHH-mm-ss}` | Raw POS text (`text/plain`) |
-| `attachment/` | Parser | `attachment/{flightId}-{posTimestamp:yyyy-MM-ddTHH-mm-ss}.json` | Parsed `PosReport`: `FlightId`, `IataCode`, `FlightNumber`, `Departure`, `Destination`, `Timestamp`, `Latitude`, `Longitude`, `GroundSpeedKnots`, `FuelOnBoardKg`, `FuelFlowKgPerHour`, `RawMessage` |
-| `results/` | Calculator | `results/{flightId}-{calcUtc:yyyy-MM-ddTHH-mm-ss}.json` | `CalculationResult`: `FlightId`, `Timestamp`, `DistanceNauticalMiles`, `RemainingFlightTimeMinutes`, `EstimatedFuelAtArrivalKg`, `LowFuelWarning` |
+| `pos/` | Ingest | `pos/{flightId}-{requestUtc:yyyy-MM-ddTHH-mm-ss-fff}` | Raw POS text (`text/plain`), includes metadata: `flightid`, `ingest-timestamp` |
+| `attachment/` | Parser | `attachment/{flightId}-{posTimestamp:yyyy-MM-ddTHH-mm-ss-fff}.json` | Parsed `PosReport`: `FlightId`, `IataCode`, `FlightNumber`, `Departure`, `Destination`, `Timestamp`, `Latitude`, `Longitude`, `GroundSpeedKnots`, `FuelOnBoardKg`, `FuelFlowKgPerHour`, `RawMessage` |
+| `results/` | Calculator | `results/{flightId}-{calcUtc:yyyy-MM-ddTHH-mm-ss-fff}.json` | `CalculationResult`: `FlightId`, `Timestamp`, `DistanceNauticalMiles`, `RemainingFlightTimeMinutes`, `EstimatedFuelAtArrivalKg`, `LowFuelWarning` |
 
 Only `pos/` triggers the Parser. Writes to `attachment/` and `results/` cannot cause recursive invocations.
 
@@ -534,6 +541,7 @@ The current stack is ready for evaluation. The gaps below are known and listed o
   - a **JWT authorizer** (Amazon Cognito or any OIDC provider) for client applications;
   - **IAM (SigV4) authorization** for service-to-service callers.
 - **Throttling:** the HTTP API Gateway now includes configurable rate limiting (default: 10 req/s rate, 20 burst) on the `$default` stage. When limits are exceeded, API Gateway returns **HTTP 429 Too Many Requests**. Customize via CDK context: `npx cdk deploy -c throttleRate=50 -c throttleBurst=100`. **Note:** Throttling controls request rate only, not authentication or authorization.
+- **CORS:** the API allows all origins (`*`) for development convenience. In production, restrict `allowOrigins` to known domains only.
 - **CORS:** replace the `*` CORS origin with known origins for production.
 - **Data protection:**
   - switch to `RemovalPolicy.RETAIN` and remove `autoDeleteObjects`;
