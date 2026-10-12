@@ -253,9 +253,9 @@ The date part of a `flightId` depends on the month you send the report in. Use t
 
 | Prefix        | Written by | Key                                                                 | Content                                                                                                                                                                                                         |
 | ------------- | ---------- | ------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `pos/`        | Ingest     | `pos/{flightId}-{requestUtc:yyyy-MM-ddTHH-mm-ss-fff}`               | Raw POS text. Metadata: `flightid`, `ingest-timestamp`                                                                                                                                                          |
-| `attachment/` | Parser     | `attachment/{flightId}-{posTimestamp:yyyy-MM-ddTHH-mm-ss-fff}.json` | Parsed `PosReport`: `FlightId`, `IataCode`, `FlightNumber`, `Departure`, `Destination`, `Timestamp` (POS time), `Latitude`, `Longitude`, `GroundSpeedKnots`, `FuelOnBoardKg`, `FuelFlowKgPerHour`, `RawMessage` |
-| `results/`    | Calculator | `results/{flightId}-{calcUtc:yyyy-MM-ddTHH-mm-ss-fff}.json`         | `CalculationResult`: `FlightId`, `Timestamp` (when the calculation ran), `DistanceNauticalMiles`, `RemainingFlightTimeMinutes`, `EstimatedFuelAtArrivalKg`, `LowFuelWarning`                                    |
+| `pos/`        | Ingest     | `pos/{flightId}-{requestUtc:yyyy-MM-ddTHH:mm:ss.fffZ}`               | Raw POS text. Metadata: `flightid`, `ingest-timestamp`                                                                                                                                                          |
+| `attachment/` | Parser     | `attachment/{flightId}-{posTimestamp:yyyy-MM-ddTHH:mm:ssZ}.json` | Parsed `PosReport`: `FlightId`, `IataCode`, `FlightNumber`, `Departure`, `Destination`, `Timestamp` (POS time), `Latitude`, `Longitude`, `GroundSpeedKnots`, `FuelOnBoardKg`, `FuelFlowKgPerHour`, `RawMessage` |
+| `results/`    | Calculator | `results/{flightId}-{calcUtc:yyyy-MM-ddTHH:mm:ss.fffZ}.json`         | `CalculationResult`: `FlightId`, `Timestamp` (when the calculation ran), `DistanceNauticalMiles`, `RemainingFlightTimeMinutes`, `EstimatedFuelAtArrivalKg`, `LowFuelWarning`                                    |
 
 
 Only `pos/` triggers Parser. Writes to `attachment/` and `results/` do not invoke it again.
@@ -270,6 +270,7 @@ Both tables use `flightId` (S) as the partition key and an ISO-8601 `timestamp` 
 | `ParsedRecords`      | POS message time | `attachment` (S3 key), `departure`, `destination` |
 | `CalculationResults` | Calculation time | `attachment` (S3 key of the `results/` object)    |
 
+**Timestamp format:** All timestamps in S3 keys and DynamoDB are ISO-8601 UTC. The `pos/` and `results/` keys include milliseconds (e.g. `2026-09-04T15:12:30.123Z`), while `attachment/` keys use the POS message timestamp without milliseconds (e.g. `2026-09-04T12:05:00Z`).
 
 
 
@@ -278,7 +279,7 @@ Both tables use `flightId` (S) as the partition key and an ISO-8601 `timestamp` 
 ```json
 {
   "flightId": "UL20420261004RGNBKK",
-  "attachmentKey": "attachment/UL20420261004RGNBKK-2026-10-04T12-05-00.json",
+  "attachmentKey": "attachment/UL20420261004RGNBKK-2026-10-04T12:05:00Z.json",
   "timestamp": "2026-10-04T12:05:00.0000000Z"
 }
 ```
