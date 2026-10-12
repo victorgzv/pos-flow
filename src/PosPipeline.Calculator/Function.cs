@@ -120,8 +120,8 @@ public class Function
                     LowFuelWarning = lowFuelWarning
                 };
 
-                // Store result in S3 (use milliseconds for uniqueness)
-                var resultKey = $"results/{flightId}-{calcResult.Timestamp:yyyy-MM-ddTHH-mm-ss-fff}.json";
+                // Store result in S3 with ISO-8601 UTC timestamp with milliseconds
+                var resultKey = $"results/{flightId}-{calcResult.Timestamp:yyyy-MM-ddTHH:mm:ss.fffZ}.json";
                 await _s3Client.PutObjectAsync(new PutObjectRequest
                 {
                     BucketName = _bucketName,
