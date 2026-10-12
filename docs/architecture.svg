@@ -31,7 +31,7 @@
 
   <!-- Ingest Lambda -->
   <rect x="480" y="40" width="140" height="50" rx="5" class="lambda-box"/>
-  <text x="550" y="70" class="text title" text-anchor="middle">Ingest »</text>
+  <text x="550" y="70" class="text title" text-anchor="middle">Ingest Î»</text>
 
   <!-- S3 Bucket -->
   <rect x="700" y="150" width="200" height="150" rx="5" class="storage-box"/>
@@ -42,7 +42,7 @@
 
   <!-- Parser Lambda -->
   <rect x="480" y="180" width="140" height="50" rx="5" class="lambda-box"/>
-  <text x="550" y="210" class="text title" text-anchor="middle">Parser »</text>
+  <text x="550" y="210" class="text title" text-anchor="middle">Parser Î»</text>
 
   <!-- SQS Queue -->
   <rect x="480" y="340" width="140" height="50" rx="5" class="queue-box"/>
@@ -54,7 +54,7 @@
 
   <!-- Calculator Lambda -->
   <rect x="700" y="340" width="140" height="50" rx="5" class="lambda-box"/>
-  <text x="770" y="370" class="text title" text-anchor="middle">Calculator »</text>
+  <text x="770" y="370" class="text title" text-anchor="middle">Calculator Î»</text>
 
   <!-- DynamoDB Tables -->
   <rect x="950" y="150" width="180" height="150" rx="5" class="storage-box"/>
@@ -66,7 +66,7 @@
 
   <!-- Status Lambda -->
   <rect x="950" y="400" width="140" height="50" rx="5" class="lambda-box"/>
-  <text x="1020" y="430" class="text title" text-anchor="middle">Status »</text>
+  <text x="1020" y="430" class="text title" text-anchor="middle">Status Î»</text>
 
   <!-- Arrows -->
   <!-- Client to API -->
@@ -131,10 +131,10 @@
 
   <!-- Legend -->
   <text x="50" y="550" class="text title">Request Flow:</text>
-  <text x="50" y="580" class="text" font-size="13">1. POST ’ Ingest validates, writes to S3 pos/, returns 202</text>
-  <text x="50" y="605" class="text" font-size="13">2. S3 event ’ Parser reads, parses, writes attachment/ + DynamoDB + SQS</text>
-  <text x="50" y="630" class="text" font-size="13">3. SQS ’ Calculator reads parsed data, calculates, writes results/ + DynamoDB</text>
-  <text x="50" y="655" class="text" font-size="13">4. GET /status ’ Status queries DynamoDB + reads S3 results</text>
+  <text x="50" y="580" class="text" font-size="13">1. POST â†’ Ingest validates, writes to S3 pos/, returns 202</text>
+  <text x="50" y="605" class="text" font-size="13">2. S3 event â†’ Parser reads, parses, writes attachment/ + DynamoDB + SQS</text>
+  <text x="50" y="630" class="text" font-size="13">3. SQS â†’ Calculator reads parsed data, calculates, writes results/ + DynamoDB</text>
+  <text x="50" y="655" class="text" font-size="13">4. GET /status â†’ Status queries DynamoDB + reads S3 results</text>
 
   <!-- Component labels -->
   <text x="50" y="720" class="text" font-size="12" font-weight="bold">Components:</text>
