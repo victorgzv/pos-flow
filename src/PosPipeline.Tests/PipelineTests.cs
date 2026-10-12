@@ -443,42 +443,54 @@ public class AirportLookupTests
 }
 
 /// <summary>
-/// Tests for S3 key uniqueness and formatting
+/// Tests for S3 key uniqueness and formatting with ISO-8601 timestamps
 /// </summary>
 public class S3KeyFormattingTests
 {
     [Fact]
-    public void S3Key_IncludesMilliseconds_ForUniqueness()
+    public void S3Key_UsesISO8601WithMilliseconds_ForUniqueness()
     {
         // Arrange
         var timestamp1 = new DateTime(2026, 10, 4, 12, 5, 0, 123, DateTimeKind.Utc);
         var timestamp2 = new DateTime(2026, 10, 4, 12, 5, 0, 456, DateTimeKind.Utc);
         var flightId = "UL20420261004RGNBKK";
 
-        // Act - Format keys with milliseconds
-        var key1 = $"pos/{flightId}-{timestamp1:yyyy-MM-ddTHH-mm-ss-fff}";
-        var key2 = $"pos/{flightId}-{timestamp2:yyyy-MM-ddTHH-mm-ss-fff}";
+        // Act - Format keys with ISO-8601 format including milliseconds
+        var key1 = $"pos/{flightId}-{timestamp1:yyyy-MM-ddTHH:mm:ss.fffZ}";
+        var key2 = $"pos/{flightId}-{timestamp2:yyyy-MM-ddTHH:mm:ss.fffZ}";
 
         // Assert - Keys are different despite same second
         Assert.NotEqual(key1, key2);
-        Assert.Contains("-123", key1);
-        Assert.Contains("-456", key2);
+        Assert.Contains("2026-10-04T12:05:00.123Z", key1);
+        Assert.Contains("2026-10-04T12:05:00.456Z", key2);
     }
 
     [Fact]
-    public void S3Key_WithoutMilliseconds_CanCollide()
+    public void AttachmentKey_UsesISO8601WithoutMilliseconds()
     {
-        // Arrange - Same second, different milliseconds
-        var timestamp1 = new DateTime(2026, 10, 4, 12, 5, 0, 123, DateTimeKind.Utc);
-        var timestamp2 = new DateTime(2026, 10, 4, 12, 5, 0, 456, DateTimeKind.Utc);
-        var flightId = "UL20420261004RGNBKK";
+        // Arrange - Attachment uses POS timestamp without milliseconds
+        var posTimestamp = new DateTime(2026, 9, 4, 12, 5, 0, DateTimeKind.Utc);
+        var flightId = "UL20420260904RGNBKK";
 
-        // Act - Format keys WITHOUT milliseconds (old format)
-        var key1 = $"pos/{flightId}-{timestamp1:yyyy-MM-ddTHH-mm-ss}";
-        var key2 = $"pos/{flightId}-{timestamp2:yyyy-MM-ddTHH-mm-ss}";
+        // Act - Format attachment key
+        var attachmentKey = $"attachment/{flightId}-{posTimestamp:yyyy-MM-ddTHH:mm:ssZ}.json";
 
-        // Assert - Keys collide (this is what we fixed)
-        Assert.Equal(key1, key2);
+        // Assert - Should match brief format
+        Assert.Equal("attachment/UL20420260904RGNBKK-2026-09-04T12:05:00Z.json", attachmentKey);
+    }
+
+    [Fact]
+    public void ResultKey_UsesISO8601WithMilliseconds()
+    {
+        // Arrange
+        var calcTimestamp = new DateTime(2026, 9, 4, 12, 6, 15, 842, DateTimeKind.Utc);
+        var flightId = "UL20420260904RGNBKK";
+
+        // Act - Format result key
+        var resultKey = $"results/{flightId}-{calcTimestamp:yyyy-MM-ddTHH:mm:ss.fffZ}.json";
+
+        // Assert - Should match brief format
+        Assert.Equal("results/UL20420260904RGNBKK-2026-09-04T12:06:15.842Z.json", resultKey);
     }
 }
 

@@ -237,11 +237,13 @@ curl -i "$API_URL/status/NOPE123"
 
 | Prefix | Written by | Key format | Content |
 |---|---|---|---|
-| `pos/` | Ingest | `pos/{flightId}-{requestUtc:yyyy-MM-ddTHH-mm-ss-fff}` | Raw POS text (`text/plain`), includes metadata: `flightid`, `ingest-timestamp` |
-| `attachment/` | Parser | `attachment/{flightId}-{posTimestamp:yyyy-MM-ddTHH-mm-ss-fff}.json` | Parsed `PosReport`: `FlightId`, `IataCode`, `FlightNumber`, `Departure`, `Destination`, `Timestamp`, `Latitude`, `Longitude`, `GroundSpeedKnots`, `FuelOnBoardKg`, `FuelFlowKgPerHour`, `RawMessage` |
-| `results/` | Calculator | `results/{flightId}-{calcUtc:yyyy-MM-ddTHH-mm-ss-fff}.json` | `CalculationResult`: `FlightId`, `Timestamp`, `DistanceNauticalMiles`, `RemainingFlightTimeMinutes`, `EstimatedFuelAtArrivalKg`, `LowFuelWarning` |
+| `pos/` | Ingest | `pos/{flightId}-{requestUtc}.json` e.g., `pos/UL20420260904RGNBKK-2026-09-04T15:12:30.123Z` | Raw POS text (`text/plain`), includes metadata: `flightid`, `ingest-timestamp` |
+| `attachment/` | Parser | `attachment/{flightId}-{posTimestamp}.json` e.g., `attachment/UL20420260904RGNBKK-2026-09-04T12:05:00Z.json` | Parsed `PosReport`: `FlightId`, `IataCode`, `FlightNumber`, `Departure`, `Destination`, `Timestamp`, `Latitude`, `Longitude`, `GroundSpeedKnots`, `FuelOnBoardKg`, `FuelFlowKgPerHour`, `RawMessage` |
+| `results/` | Calculator | `results/{flightId}-{calcUtc}.json` e.g., `results/UL20420260904RGNBKK-2026-09-04T12:06:15.842Z.json` | `CalculationResult`: `FlightId`, `Timestamp`, `DistanceNauticalMiles`, `RemainingFlightTimeMinutes`, `EstimatedFuelAtArrivalKg`, `LowFuelWarning` |
 
 Only `pos/` triggers the Parser. Writes to `attachment/` and `results/` cannot cause recursive invocations.
+
+**Timestamp format:** All timestamps in S3 keys and DynamoDB are ISO-8601 UTC format. The `pos/` and `results/` keys include milliseconds (e.g., `2026-09-04T15:12:30.123Z`), while `attachment/` keys use the POS message timestamp without milliseconds (e.g., `2026-09-04T12:05:00Z`).
 
 ### DynamoDB tables
 

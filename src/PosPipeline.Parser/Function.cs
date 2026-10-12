@@ -46,7 +46,8 @@ public class Function
         {
             try
             {
-                var s3Key = record.S3.Object.Key;
+                // URL-decode the S3 key since colons may arrive encoded
+                var s3Key = System.Net.WebUtility.UrlDecode(record.S3.Object.Key);
                 context.Logger.LogInformation($"Processing S3 object: {s3Key}");
 
                 // Get raw POS message from S3 with metadata
@@ -68,8 +69,8 @@ public class Function
 
                 context.Logger.LogInformation($"Parsed POS report for flight {posReport.FlightId}");
 
-                // Store parsed JSON as attachment (use milliseconds for uniqueness)
-                var attachmentKey = $"attachment/{posReport.FlightId}-{posReport.Timestamp:yyyy-MM-ddTHH-mm-ss-fff}.json";
+                // Store parsed JSON as attachment with ISO-8601 timestamp (POS timestamp, no milliseconds)
+                var attachmentKey = $"attachment/{posReport.FlightId}-{posReport.Timestamp:yyyy-MM-ddTHH:mm:ssZ}.json";
                 await _s3Client.PutObjectAsync(new PutObjectRequest
                 {
                     BucketName = _bucketName,
