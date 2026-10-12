@@ -11,17 +11,23 @@ A serverless, event-driven pipeline on AWS that ingests aircraft position (POS) 
 3. [API reference](#api-reference)
 4. [Data model](#data-model)
 5. [Project structure](#project-structure)
-6. [Prerequisites](#prerequisites)
-7. [Run the unit tests](#run-the-unit-tests)
-8. [Run locally on Floci](#run-locally-on-floci)
-9. [Deploy to AWS](#deploy-to-aws)
-10. [Design decisions and trade-offs](#design-decisions-and-trade-offs)
-11. [Security and production hardening](#security-and-production-hardening)
-12. [Assumptions](#assumptions)
+6. [Testing](#testing)
+7. [Prerequisites](#prerequisites)
+8. [Run the unit tests](#run-the-unit-tests)
+9. [Run locally on Floci](#run-locally-on-floci)
+10. [Deploy to AWS](#deploy-to-aws)
+11. [Design decisions and trade-offs](#design-decisions-and-trade-offs)
+12. [Security and production hardening](#security-and-production-hardening)
+13. [Assumptions](#assumptions)
 
 ---
 
 ## Architecture
+
+![Architecture Diagram](docs/architecture.svg)
+
+<details>
+<summary>Architecture diagram (Mermaid source)</summary>
 
 ```mermaid
 flowchart LR
@@ -68,6 +74,8 @@ flowchart LR
     status -- Query --> parsed
     status -- GetObject --> res
 ```
+
+</details>
 
 **Request flow**
 
@@ -125,6 +133,8 @@ POS/UL204.FR RGN/TO BKK/041205/N1642.3E09612.5/450/12500/2800
 ```
 
 `yyyy` and `MM` are the UTC year and month when the report was received. `dd` is the day in the message. A report sent in October 2026 with day `04` gives **`UL20420261004RGNBKK`**.
+
+**Important:** The Parser uses the `flightId` and ingest timestamp stored in S3 object metadata (written by Ingest), ensuring the date components match the original POST request time rather than the S3 event delivery time. This prevents flightId mismatches near month boundaries.
 
 ### Calculation
 
@@ -186,8 +196,8 @@ curl -i "$API_URL/status/UL20420261004RGNBKK"
 
 | Status | When | Body |
 |---|---|---|
-| `200` `COMPLETE` | A `CalculationResults` row exists | The latest calculation, loaded from the `results/` object it points to |
-| `200` `PROCESSING` | Parsed but not yet calculated | `FlightId`, `Status: "PROCESSING"`, `Timestamp` (POS message time). The calculation fields are `null` |
+| `200` `COMPLETE` | A `CalculationResults` row exists and no newer parsed record is pending | The latest calculation, loaded from the `results/` object it points to |
+| `200` `PROCESSING` | Parsed but not yet calculated, or a newer report is parsed but not yet calculated | `FlightId`, `Status: "PROCESSING"`, `Timestamp` (POS message time). The calculation fields are `null` |
 | `404` | Nothing recorded for this `flightId` yet | `{ "error": "No records found for flight <flightId>" }` |
 | `500` | Unexpected failure | `{ "error": "Internal server error" }` |
 
@@ -227,9 +237,9 @@ curl -i "$API_URL/status/NOPE123"
 
 | Prefix | Written by | Key format | Content |
 |---|---|---|---|
-| `pos/` | Ingest | `pos/{flightId}-{requestUtc:yyyy-MM-ddTHH-mm-ss}` | Raw POS text (`text/plain`) |
-| `attachment/` | Parser | `attachment/{flightId}-{posTimestamp:yyyy-MM-ddTHH-mm-ss}.json` | Parsed `PosReport`: `FlightId`, `IataCode`, `FlightNumber`, `Departure`, `Destination`, `Timestamp`, `Latitude`, `Longitude`, `GroundSpeedKnots`, `FuelOnBoardKg`, `FuelFlowKgPerHour`, `RawMessage` |
-| `results/` | Calculator | `results/{flightId}-{calcUtc:yyyy-MM-ddTHH-mm-ss}.json` | `CalculationResult`: `FlightId`, `Timestamp`, `DistanceNauticalMiles`, `RemainingFlightTimeMinutes`, `EstimatedFuelAtArrivalKg`, `LowFuelWarning` |
+| `pos/` | Ingest | `pos/{flightId}-{requestUtc:yyyy-MM-ddTHH-mm-ss-fff}` | Raw POS text (`text/plain`), includes metadata: `flightid`, `ingest-timestamp` |
+| `attachment/` | Parser | `attachment/{flightId}-{posTimestamp:yyyy-MM-ddTHH-mm-ss-fff}.json` | Parsed `PosReport`: `FlightId`, `IataCode`, `FlightNumber`, `Departure`, `Destination`, `Timestamp`, `Latitude`, `Longitude`, `GroundSpeedKnots`, `FuelOnBoardKg`, `FuelFlowKgPerHour`, `RawMessage` |
+| `results/` | Calculator | `results/{flightId}-{calcUtc:yyyy-MM-ddTHH-mm-ss-fff}.json` | `CalculationResult`: `FlightId`, `Timestamp`, `DistanceNauticalMiles`, `RemainingFlightTimeMinutes`, `EstimatedFuelAtArrivalKg`, `LowFuelWarning` |
 
 Only `pos/` triggers the Parser. Writes to `attachment/` and `results/` cannot cause recursive invocations.
 
@@ -289,6 +299,47 @@ CDK sets every variable. Each handler checks for its variables in its constructo
     ├── PosPipeline.Status/Function.cs      # GET /status/{flightId}
     └── PosPipeline.Tests/                  # xUnit tests
 ```
+
+---
+
+## Testing
+
+The pipeline has comprehensive test coverage at multiple levels:
+
+### .NET Unit Tests (27 tests)
+
+The C# codebase includes 27 xUnit tests covering core business logic:
+
+- **PosParser (10 tests):** Gold example parsing, coordinate conversion (N/S/E/W hemispheres), invalid message handling, field validation
+- **FlightIdBuilder (3 tests):** Flight ID format generation, date handling, multi-character IATA codes
+- **HaversineCalculator (8 tests):** Distance calculations, flight time estimates, fuel consumption, arrival fuel predictions
+- **AirportLookup (6 tests):** Airport code resolution, case-insensitive lookup, validation
+
+Run with: `cd src && dotnet test`
+
+### CDK Infrastructure Tests (17 tests)
+
+TypeScript tests using `aws-cdk-lib/assertions` verify infrastructure-as-code compliance:
+
+- **API Gateway throttling:** Default limits (10 req/s, 20 burst), context override support
+- **S3 security:** Encryption enabled, public access blocked on all buckets
+- **SQS configuration:** Process queue has DLQ with `maxReceiveCount: 3`, 14-day DLQ retention
+- **DynamoDB schema:** Correct partition and sort keys on both tables
+- **IAM least privilege:** All 4 application Lambda roles have no managed policies, no wildcard actions or resources (CDK helper functions excluded and documented)
+- **CloudWatch Logs:** 4 log groups with 14-day retention
+- **Lambda runtime:** All functions use `dotnet8`
+- **Local mode:** `-c local=true` disables `autoDeleteObjects` custom resource
+
+Run with: `cd cdk && npm test`
+
+### Continuous Integration
+
+GitHub Actions runs all tests on every push and pull request:
+
+- **.NET job:** Restores, builds, and runs 27 unit tests with NuGet caching
+- **CDK job:** Runs TypeScript compilation check (`tsc --noEmit`), 17 infrastructure tests, and `cdk synth` to validate the template
+
+The CI badge at the top of this README shows current build status.
 
 ---
 
@@ -490,6 +541,7 @@ The current stack is ready for evaluation. The gaps below are known and listed o
   - a **JWT authorizer** (Amazon Cognito or any OIDC provider) for client applications;
   - **IAM (SigV4) authorization** for service-to-service callers.
 - **Throttling:** the HTTP API Gateway now includes configurable rate limiting (default: 10 req/s rate, 20 burst) on the `$default` stage. When limits are exceeded, API Gateway returns **HTTP 429 Too Many Requests**. Customize via CDK context: `npx cdk deploy -c throttleRate=50 -c throttleBurst=100`. **Note:** Throttling controls request rate only, not authentication or authorization.
+- **CORS:** the API allows all origins (`*`) for development convenience. In production, restrict `allowOrigins` to known domains only.
 - **CORS:** replace the `*` CORS origin with known origins for production.
 - **Data protection:**
   - switch to `RemovalPolicy.RETAIN` and remove `autoDeleteObjects`;

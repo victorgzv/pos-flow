@@ -74,8 +74,6 @@ public class Function
                 if (queryResponse.Items.Count == 0)
                     throw new InvalidOperationException($"No parsed record found for flight {flightId} at {timestamp}");
 
-                var parsedRecordAttachment = queryResponse.Items[0]["attachment"].S;
-
                 // Get parsed POS data from S3 attachment (full payload with all fields)
                 var getResponse = await _s3Client.GetObjectAsync(_bucketName, attachmentKey);
                 PosReport? posReport;
@@ -122,8 +120,8 @@ public class Function
                     LowFuelWarning = lowFuelWarning
                 };
 
-                // Store result in S3
-                var resultKey = $"results/{flightId}-{calcResult.Timestamp:yyyy-MM-ddTHH-mm-ss}.json";
+                // Store result in S3 (use milliseconds for uniqueness)
+                var resultKey = $"results/{flightId}-{calcResult.Timestamp:yyyy-MM-ddTHH-mm-ss-fff}.json";
                 await _s3Client.PutObjectAsync(new PutObjectRequest
                 {
                     BucketName = _bucketName,

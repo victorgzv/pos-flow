@@ -49,7 +49,7 @@ public class Function
                 var s3Key = record.S3.Object.Key;
                 context.Logger.LogInformation($"Processing S3 object: {s3Key}");
 
-                // Get raw POS message from S3
+                // Get raw POS message from S3 with metadata
                 var getResponse = await _s3Client.GetObjectAsync(_bucketName, s3Key);
                 string rawMessage;
                 using (var reader = new StreamReader(getResponse.ResponseStream))
@@ -57,14 +57,19 @@ public class Function
                     rawMessage = await reader.ReadToEndAsync();
                 }
 
-                // Parse POS message
-                var requestTimestamp = record.EventTime.ToUniversalTime();
-                var posReport = _posParser.Parse(rawMessage, requestTimestamp);
+                // Extract flightId and ingest timestamp from S3 object metadata
+                // This ensures we use the ingest time (when POST was received) rather than S3 event time
+                var flightId = getResponse.Metadata["x-amz-meta-flightid"];
+                var ingestTimestampStr = getResponse.Metadata["x-amz-meta-ingest-timestamp"];
+                var ingestTimestamp = DateTime.Parse(ingestTimestampStr).ToUniversalTime();
+
+                // Parse POS message using the ingest timestamp to ensure consistent flightId
+                var posReport = _posParser.Parse(rawMessage, ingestTimestamp);
 
                 context.Logger.LogInformation($"Parsed POS report for flight {posReport.FlightId}");
 
-                // Store parsed JSON as attachment
-                var attachmentKey = $"attachment/{posReport.FlightId}-{posReport.Timestamp:yyyy-MM-ddTHH-mm-ss}.json";
+                // Store parsed JSON as attachment (use milliseconds for uniqueness)
+                var attachmentKey = $"attachment/{posReport.FlightId}-{posReport.Timestamp:yyyy-MM-ddTHH-mm-ss-fff}.json";
                 await _s3Client.PutObjectAsync(new PutObjectRequest
                 {
                     BucketName = _bucketName,
